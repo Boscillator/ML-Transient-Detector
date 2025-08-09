@@ -239,16 +239,26 @@ class TransientDetectorParameters:
     post_gain: float = 1.0
     post_bias: float = 0.0
 
-def moving_average(x: jnp.ndarray, window_size: float) -> jnp.ndarray:
+def moving_average(x: jnp.ndarray, window_size: float, is_training: bool = True) -> jnp.ndarray:
     """
-    Differentiable, fractional window moving average with a softmax kernel.
+    Differentiable, fractional window moving average with a softmax or rectangle kernel.
     Uses global MAX_KERNEL_SIZE (must be odd).
     """
     half = MAX_KERNEL_SIZE // 2
     idxs = jnp.arange(-half, half + 1)
-    # Softmax kernel centered at 0, width controlled by window_size
-    kernel = jax.nn.softmax(-((idxs / window_size) ** 2))
-    kernel = kernel / kernel.sum()
+
+    def get_kernel():
+        if is_training:
+            # Softmax kernel centered at 0, width controlled by window_size
+            kernel = jax.nn.softmax(-((idxs / window_size) ** 2))
+        else:
+            # Rectangle kernel (uniform)
+            width = jnp.clip(window_size, 1.0, MAX_KERNEL_SIZE)
+            mask = (jnp.abs(idxs) <= (width // 2)).astype(jnp.float32)
+            kernel = mask
+        return kernel / kernel.sum()
+
+    kernel = get_kernel()
     return jnp.convolve(x, kernel, mode='same')
 
 _dbg_n = 0
@@ -257,7 +267,8 @@ def transient_detector(
     params: TransientDetectorParameters,
     audio: jnp.ndarray,
     sample_rate: float,
-    do_debug: bool = False
+    do_debug: bool = False,
+    is_training: bool = True
 ) -> jnp.ndarray:
     # Convert window sizes from seconds to samples
     envelop1_window_samples = params.fast_window * sample_rate
@@ -265,8 +276,9 @@ def transient_detector(
 
     power = jnp.abs(audio)
 
-    envelop1 = moving_average(power, envelop1_window_samples)
-    envelop2 = moving_average(power, envelop2_window_samples)
+    envelop1 = moving_average(power, envelop1_window_samples, is_training=is_training)
+    envelop2 = moving_average(power, envelop2_window_samples, is_training=is_training)
+
 
     inner = params.w0 + params.w1 * envelop1 + params.w2 * envelop2
     outer = params.post_gain * inner + params.post_bias
@@ -322,7 +334,7 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
     def chunk_loss(params_array, audio, label, sample_rate, valid_len):
         fast_window, slow_window, w0, w1, w2, post_gain, post_bias = params_array
         params = TransientDetectorParameters(fast_window=fast_window, slow_window=slow_window, w0=w0, w1=w1, w2=w2, post_gain=post_gain, post_bias=post_bias)
-        pred = transient_detector(params, audio, sample_rate)
+        pred = transient_detector(params, audio, sample_rate, is_training=True)
         # Create mask for valid (unpadded) region
         mask = jnp.arange(label.shape[0]) < valid_len
         # Compute loss over all elements, mask out padded region
@@ -385,7 +397,7 @@ def main() -> None:
     os.makedirs('data/plots/chunk_preds', exist_ok=True)
     for i, chunk in enumerate(chunks[:5]):
         audio_jnp = jnp.asarray(chunk.audio)
-        pred = transient_detector(params, audio_jnp, chunk.sample_rate, do_debug=True)
+        pred = transient_detector(params, audio_jnp, chunk.sample_rate, do_debug=True, is_training=False)
         out_path = f'data/plots/chunk_preds/chunk_{i+1}_pred.png'
         plot_chunk_with_prediction(chunk, pred, out_path, duration_s=min(5.0, len(chunk.audio)/chunk.sample_rate))
         print(f"Plotted prediction for chunk {i+1} to {out_path}")
@@ -399,7 +411,7 @@ def main() -> None:
     os.makedirs('data/plots/chunk_preds_optimized', exist_ok=True)
     for i, chunk in enumerate(chunks[:5]):
         audio_jnp = jnp.asarray(chunk.audio)
-        pred = transient_detector(opt_params, audio_jnp, chunk.sample_rate, do_debug=True)
+        pred = transient_detector(opt_params, audio_jnp, chunk.sample_rate, do_debug=True, is_training=False)
         out_path = f'data/plots/chunk_preds_optimized/chunk_{i+1}_pred.png'
         plot_chunk_with_prediction(chunk, pred, out_path, duration_s=min(5.0, len(chunk.audio)/chunk.sample_rate))
         print(f"Plotted optimized prediction for chunk {i+1} to {out_path}")
