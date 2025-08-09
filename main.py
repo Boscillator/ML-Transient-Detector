@@ -1,20 +1,18 @@
-from dataclasses import dataclass, astuple
+from dataclasses import dataclass, astuple, field
 import numpy as np
 from scipy.io import wavfile
 import os
 import matplotlib.pyplot as plt
 import random
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Optional
 import scipy.optimize
 import jax.numpy as jnp
 import jax
 
-# Set this to 'cpu' or 'gpu' to control device placement
-DEVICE = "gpu"  # or 'cpu'
 
 # Maximum window size for moving average (in seconds)
 MAX_WINDOW_SIZE = 0.5  # seconds, must match optimizer bounds
-# Assumed sample rate for kernel size
+# Assumed sample rate for kernel size (must be global for MAX_KERNEL_SIZE)
 ASSUME_SAMPLE_RATE = 48000
 # Kernel size for moving average (must be odd)
 MAX_KERNEL_SIZE = int(round(MAX_WINDOW_SIZE * ASSUME_SAMPLE_RATE))
@@ -29,7 +27,9 @@ class TransientExample:
     sample_rate: int  # Sample rate of the audio
 
 
-def load_transient_example(base_path: str, window_s: float = 0.04) -> TransientExample:
+def load_transient_example(
+    base_path: str, window_s: Optional[float] = None
+) -> TransientExample:
     """
     Given a base file path (without extension), load the wav and txt, generate label array, and return a TransientExample.
     Example: base_path='data/export/DarkIllusion_ElecGtr5DI' will load .wav and .txt
@@ -38,6 +38,8 @@ def load_transient_example(base_path: str, window_s: float = 0.04) -> TransientE
     label_path = base_path + "_Labels.txt"
     audio, sr = load_wav_mono_normalized(audio_path)
     transient_times = load_transient_times(label_path)
+    if window_s is None:
+        window_s = ExperimentHyperparameters.window_s
     label_array = generate_label_array(
         transient_times, len(audio), sr, window_s=window_s
     )
@@ -73,13 +75,18 @@ def load_wav_mono_normalized(filepath: str) -> tuple[np.ndarray, int]:
 
 
 def generate_label_array(
-    transient_times: list[float], audio_length: int, sr: int, window_s: float = 0.01
+    transient_times: list[float],
+    audio_length: int,
+    sr: int,
+    window_s: Optional[float] = None,
 ) -> np.ndarray:
     """
     Generate a label array (0.0/1.0) for the given transient times.
     Each transient is marked as 1.0 for ±window_s/2 around the transient time.
     """
     label = np.zeros(audio_length, dtype=np.float32)
+    if window_s is None:
+        window_s = ExperimentHyperparameters.window_s
     half_window = window_s / 2.0
     for t in transient_times:
         start = int(max(0, (t - half_window) * sr))
@@ -118,9 +125,9 @@ def plot_transient_example(
 
 def chunkify_examples(
     example: "TransientExample",
-    min_length_s: float = 5.0,
-    max_length_s: float = 5.0,
-    overlap_s: float = 1.0,
+    min_length_s: Optional[float] = None,
+    max_length_s: Optional[float] = None,
+    overlap_s: Optional[float] = None,
 ) -> List["TransientExample"]:
     """
     Split a TransientExample into overlapping chunks of random length.
@@ -133,6 +140,12 @@ def chunkify_examples(
     total_len = len(audio)
     chunks = []
     start_sample = 0
+    if min_length_s is None:
+        min_length_s = ExperimentHyperparameters.min_length_s
+    if max_length_s is None:
+        max_length_s = ExperimentHyperparameters.max_length_s
+    if overlap_s is None:
+        overlap_s = ExperimentHyperparameters.overlap_s
     while start_sample < total_len:
         chunk_length_s = random.uniform(min_length_s, max_length_s)
         chunk_length = int(chunk_length_s * sr)
@@ -257,7 +270,11 @@ def plot_predictions(
     for i, chunk in enumerate(chunks[:5]):
         audio_jnp = jnp.asarray(chunk.audio)
         pred = transient_detector(
-            params, audio_jnp, chunk.sample_rate, do_debug=do_debug, is_training=is_training
+            params,
+            audio_jnp,
+            chunk.sample_rate,
+            do_debug=do_debug,
+            is_training=is_training,
         )
         out_path = f"{output_dir}/{prefix}chunk_{i + 1}_pred.png"
         plot_chunk_with_prediction(
@@ -280,6 +297,35 @@ class TransientDetectorParameters:
     post_gain: float = 1.0
     post_bias: float = 0.0
 
+
+# Experiment-level hyperparameters dataclass
+@dataclass
+class ExperimentHyperparameters:
+    DEVICE: str = "gpu"  # or 'cpu'
+    min_length_s: float = 5.0
+    max_length_s: float = 10.0
+    overlap_s: float = 1.0
+    window_s: float = 0.04  # for label generation
+    loss_epsilon: float = 1e-7
+    # Bounds for optimization (in order of TransientDetectorParameters fields)
+    bounds: tuple = (
+        (1e-3, 0.5),  # fast_window
+        (1e-3, 0.5),  # slow_window
+        (-500.0, 500.0),  # w0
+        (-500.0, 500.0),  # w1
+        (-500.0, 500.0),  # w2
+        (-1e4, 1e4),  # post_gain
+        (-1.0, 1.0),  # post_bias
+    )
+    detector_defaults: TransientDetectorParameters = field(
+        default_factory=TransientDetectorParameters
+    )
+
+
+# Set detector_defaults after class definition to avoid forward reference issues
+ExperimentHyperparameters.detector_defaults = TransientDetectorParameters()
+
+
 def softmax_kernel(window_size: float) -> jnp.ndarray:
     half = MAX_KERNEL_SIZE // 2
     idxs = jnp.arange(-half, half + 1)
@@ -293,6 +339,7 @@ def softmax_kernel(window_size: float) -> jnp.ndarray:
     kernel = jax.nn.softmax(logits)
     return kernel / kernel.sum()
 
+
 def rectangle_kernel(window_size: float) -> jnp.ndarray:
     half = MAX_KERNEL_SIZE // 2
     idxs = jnp.arange(-half, half + 1)
@@ -301,6 +348,7 @@ def rectangle_kernel(window_size: float) -> jnp.ndarray:
     rect_mask = (idxs >= -width + 1) & (idxs <= 0)
     kernel = rect_mask.astype(jnp.float32)
     return kernel / kernel.sum()
+
 
 def moving_average(
     x: jnp.ndarray, window_size: float, is_training: bool = True
@@ -363,7 +411,7 @@ def transient_detector(
 
 def loss_function(target: jnp.ndarray, prediction: jnp.ndarray) -> jnp.ndarray:
     # Binary cross entropy loss
-    eps = 1e-7
+    eps = ExperimentHyperparameters.loss_epsilon
     prediction = jnp.clip(prediction, eps, 1 - eps)
     loss = -(target * jnp.log(prediction) + (1 - target) * jnp.log(1 - prediction))
     return jnp.mean(loss)
@@ -389,7 +437,7 @@ def optimize_transient_detector(
     valid_lengths = jnp.array([len(a) for a in audio_arrs])
 
     # Move all batch arrays to the selected device
-    device = jax.devices(DEVICE)[0]
+    device = jax.devices(ExperimentHyperparameters.DEVICE)[0]
     audio_batch = jax.device_put(audio_batch, device)
     label_batch = jax.device_put(label_batch, device)
     sample_rate_batch = jax.device_put(sample_rate_batch, device)
@@ -431,15 +479,7 @@ def optimize_transient_detector(
 
     default_params = TransientDetectorParameters()
     x0 = np.array(astuple(default_params), dtype=np.float32)
-    bounds = [
-        (1e-3, MAX_WINDOW_SIZE),  # fast_window
-        (1e-3, MAX_WINDOW_SIZE),  # slow_window
-        (-500.0, 500.0),  # w0 (bias)
-        (-500.0, 500.0),  # w1 (fast_env weight)
-        (-500.0, 500.0),  # w2 (slow_env weight)
-        (-1e4, 1e4),  # post_gain
-        (-1.0, 1.0),  # post_bias
-    ]
+    bounds = list(ExperimentHyperparameters.bounds)
 
     # Progress display callback
     def progress_callback(xk):
@@ -466,7 +506,6 @@ def main() -> None:
     chunks = chunks[:5]  # Limit to first 10 chunks for testing
 
     params = TransientDetectorParameters()
-
 
     # Plot predictions before optimization (eval kernel)
     plot_predictions(
@@ -505,6 +544,7 @@ def main() -> None:
         prefix="",
         print_prefix="Optimized: ",
     )
+
 
 if __name__ == "__main__":
     main()
