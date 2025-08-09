@@ -4,6 +4,7 @@ from scipy.io import wavfile
 import os
 import matplotlib.pyplot as plt
 
+
 @dataclass
 class TransientExample:
     audio: np.ndarray  # 1D numpy array, mono, normalized to [-1.0, 1.0]
@@ -12,7 +13,7 @@ class TransientExample:
     sample_rate: int  # Sample rate of the audio
 
 
-def load_transient_example(base_path, window_s=0.01):
+def load_transient_example(base_path: str, window_s: float = 0.01) -> TransientExample:
     """
     Given a base file path (without extension), load the wav and txt, generate label array, and return a TransientExample.
     Example: base_path='data/export/DarkIllusion_ElecGtr5DI' will load .wav and .txt
@@ -32,13 +33,13 @@ def load_transient_example(base_path, window_s=0.01):
     )
 
 
-def load_transient_times(txt_path):
+def load_transient_times(txt_path: str) -> list[float]:
     """Load transient times (in seconds) from a label .txt file (first column only) using numpy."""
     times = np.loadtxt(txt_path, usecols=0, comments="#", ndmin=1)
     return times.tolist()
 
 
-def load_wav_mono_normalized(filepath):
+def load_wav_mono_normalized(filepath: str) -> tuple[np.ndarray, int]:
     """Load a wav file, convert to mono if needed, and normalize to [-1.0, 1.0]."""
     sr, data = wavfile.read(filepath)
     if data.ndim > 1:
@@ -55,7 +56,9 @@ def load_wav_mono_normalized(filepath):
     return data, sr
 
 
-def generate_label_array(transient_times, audio_length, sr, window_s=0.01):
+def generate_label_array(
+    transient_times: list[float], audio_length: int, sr: int, window_s: float = 0.01
+) -> np.ndarray:
     """
     Generate a label array (0.0/1.0) for the given transient times.
     Each transient is marked as 1.0 for ±window_s/2 around the transient time.
@@ -69,7 +72,9 @@ def generate_label_array(transient_times, audio_length, sr, window_s=0.01):
     return label
 
 
-def plot_transient_example(example, out_path, duration_s=1.0):
+def plot_transient_example(
+    example: TransientExample, out_path: str, duration_s: float = 1.0
+) -> None:
     """Plot the audio and label array of a TransientExample and save to out_path. Plots up to duration_s seconds."""
     audio = example.audio
     label = example.label_array
@@ -79,26 +84,30 @@ def plot_transient_example(example, out_path, duration_s=1.0):
     t = np.arange(max_samples) / sr
 
     fig, ax1 = plt.subplots(figsize=(12, 4))
-    ax1.plot(t, audio[:max_samples], label='Audio', color='C0', linewidth=0.8)
-    ax1.set_ylabel('Audio')
-    ax1.set_xlabel('Time (s)')
+    ax1.plot(t, audio[:max_samples], label="Audio", color="C0", linewidth=0.8)
+    ax1.set_ylabel("Audio")
+    ax1.set_xlabel("Time (s)")
     ax2 = ax1.twinx()
-    ax2.plot(t, label[:max_samples], label='Label', color='C1', alpha=0.5, linewidth=1.5)
-    ax2.set_ylabel('Label (0/1)')
-    ax1.set_title(f'Audio and Transient Label (First {duration_s} Second(s))')
+    ax2.plot(
+        t, label[:max_samples], label="Label", color="C1", alpha=0.5, linewidth=1.5
+    )
+    ax2.set_ylabel("Label (0/1)")
+    ax1.set_title(f"Audio and Transient Label (First {duration_s} Second(s))")
     ax1.set_xlim(0, duration_s)
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path)
     plt.close(fig)
 
+
 # new functions go right above this line.
 
-def main():
+
+def main() -> None:
     # Load and plot an example
-    base_path = 'data/export/DarkIllusion_ElecGtr5DI'
+    base_path = "data/export/DarkIllusion_ElecGtr5DI"
     example = load_transient_example(base_path)
-    plot_path = 'data/plots/input_data.png'
+    plot_path = "data/plots/input_data.png"
     plot_transient_example(example, plot_path, duration_s=5.0)
     print(f"Plotted and saved to {plot_path}")
 
