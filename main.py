@@ -3,7 +3,8 @@ import numpy as np
 from scipy.io import wavfile
 import os
 import matplotlib.pyplot as plt
-
+import random
+from typing import List
 
 @dataclass
 class TransientExample:
@@ -57,7 +58,10 @@ def load_wav_mono_normalized(filepath: str) -> tuple[np.ndarray, int]:
 
 
 def generate_label_array(
-    transient_times: list[float], audio_length: int, sr: int, window_s: float = 0.01
+    transient_times: list[float],
+    audio_length: int,
+    sr: int,
+    window_s: float = 0.01
 ) -> np.ndarray:
     """
     Generate a label array (0.0/1.0) for the given transient times.
@@ -73,7 +77,9 @@ def generate_label_array(
 
 
 def plot_transient_example(
-    example: TransientExample, out_path: str, duration_s: float = 1.0
+    example: TransientExample,
+    out_path: str,
+    duration_s: float = 1.0
 ) -> None:
     """Plot the audio and label array of a TransientExample and save to out_path. Plots up to duration_s seconds."""
     audio = example.audio
@@ -84,32 +90,80 @@ def plot_transient_example(
     t = np.arange(max_samples) / sr
 
     fig, ax1 = plt.subplots(figsize=(12, 4))
-    ax1.plot(t, audio[:max_samples], label="Audio", color="C0", linewidth=0.8)
-    ax1.set_ylabel("Audio")
-    ax1.set_xlabel("Time (s)")
+    ax1.plot(t, audio[:max_samples], label='Audio', color='C0', linewidth=0.8)
+    ax1.set_ylabel('Audio')
+    ax1.set_xlabel('Time (s)')
     ax2 = ax1.twinx()
-    ax2.plot(
-        t, label[:max_samples], label="Label", color="C1", alpha=0.5, linewidth=1.5
-    )
-    ax2.set_ylabel("Label (0/1)")
-    ax1.set_title(f"Audio and Transient Label (First {duration_s} Second(s))")
+    ax2.plot(t, label[:max_samples], label='Label', color='C1', alpha=0.5, linewidth=1.5)
+    ax2.set_ylabel('Label (0/1)')
+    ax1.set_title(f'Audio and Transient Label (First {duration_s} Second(s))')
     ax1.set_xlim(0, duration_s)
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path)
     plt.close(fig)
 
+def chunkify_examples(
+    example: "TransientExample",
+    min_length_s: float = 3.0,
+    max_length_s: float = 5.0,
+    overlap_s: float = 1.0
+) -> List["TransientExample"]:
+    """
+    Split a TransientExample into overlapping chunks of random length.
+    Each chunk is a new TransientExample with adjusted transient_times.
+    """
+    audio = example.audio
+    label = example.label_array
+    sr = example.sample_rate
+    transients = example.transient_times
+    total_len = len(audio)
+    chunks = []
+    start_sample = 0
+    while start_sample < total_len:
+        chunk_length_s = random.uniform(min_length_s, max_length_s)
+        chunk_length = int(chunk_length_s * sr)
+        end_sample = min(start_sample + chunk_length, total_len)
+        # Slice audio and label
+        audio_chunk = audio[start_sample:end_sample]
+        label_chunk = label[start_sample:end_sample]
+        # Find transients in this chunk, adjust to chunk-relative time
+        chunk_start_time = start_sample / sr
+        chunk_end_time = end_sample / sr
+        chunk_transients = [t - chunk_start_time for t in transients if chunk_start_time <= t < chunk_end_time]
+        # Create chunk TransientExample
+        chunk = TransientExample(
+            audio=audio_chunk,
+            label_array=label_chunk,
+            transient_times=chunk_transients,
+            sample_rate=sr
+        )
+        chunks.append(chunk)
+        # Advance start_sample with overlap
+        if end_sample == total_len:
+            break
+        start_sample = end_sample - int(overlap_s * sr)
+        if start_sample < 0:
+            start_sample = 0
+    return chunks
 
-# new functions go right above this line.
-
+def plot_chunks(
+    chunks: List[TransientExample],
+    out_dir: str = "data/plots/chunks"
+) -> None:
+    """Plot the first 5 chunks using plot_transient_example."""
+    os.makedirs(out_dir, exist_ok=True)
+    for i, chunk in enumerate(chunks[:5]):
+        out_path = os.path.join(out_dir, f"chunk_{i+1}.png")
+        plot_transient_example(chunk, out_path)
+    print(f"Plotted {min(5, len(chunks))} chunks to {out_dir}")
 
 def main() -> None:
     # Load and plot an example
-    base_path = "data/export/DarkIllusion_ElecGtr5DI"
+    base_path = 'data/export/DarkIllusion_ElecGtr5DI'
     example = load_transient_example(base_path)
-    plot_path = "data/plots/input_data.png"
-    plot_transient_example(example, plot_path, duration_s=5.0)
-    print(f"Plotted and saved to {plot_path}")
+    chunks = chunkify_examples(example)
+    plot_chunks(chunks)
 
 
 if __name__ == "__main__":
