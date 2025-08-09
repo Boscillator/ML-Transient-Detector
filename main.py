@@ -244,6 +244,31 @@ def plot_chunks(
     print(f"Plotted {min(5, len(chunks))} chunks to {out_dir}")
 
 
+def plot_predictions(
+    chunks,
+    params,
+    output_dir,
+    is_training,
+    do_debug=True,
+    prefix="",
+    print_prefix="",
+):
+    os.makedirs(output_dir, exist_ok=True)
+    for i, chunk in enumerate(chunks[:5]):
+        audio_jnp = jnp.asarray(chunk.audio)
+        pred = transient_detector(
+            params, audio_jnp, chunk.sample_rate, do_debug=do_debug, is_training=is_training
+        )
+        out_path = f"{output_dir}/{prefix}chunk_{i + 1}_pred.png"
+        plot_chunk_with_prediction(
+            chunk,
+            pred,
+            out_path,
+            duration_s=min(5.0, len(chunk.audio) / chunk.sample_rate),
+        )
+        print(f"{print_prefix}Plotted prediction for chunk {i + 1} to {out_path}")
+
+
 @jax.tree_util.register_dataclass
 @dataclass
 class TransientDetectorParameters:
@@ -255,6 +280,27 @@ class TransientDetectorParameters:
     post_gain: float = 1.0
     post_bias: float = 0.0
 
+def softmax_kernel(window_size: float) -> jnp.ndarray:
+    half = MAX_KERNEL_SIZE // 2
+    idxs = jnp.arange(-half, half + 1)
+    mask = idxs <= 0
+    causal_idxs = idxs * mask
+
+    # Causal softmax kernel: only current and past
+    # Set future weights to -inf so softmax is zero there
+    logits = -((causal_idxs / window_size) ** 2)
+    logits = jnp.where(mask, logits, -jnp.inf)
+    kernel = jax.nn.softmax(logits)
+    return kernel / kernel.sum()
+
+def rectangle_kernel(window_size: float) -> jnp.ndarray:
+    half = MAX_KERNEL_SIZE // 2
+    idxs = jnp.arange(-half, half + 1)
+
+    width = jnp.clip(window_size, 1.0, MAX_KERNEL_SIZE)
+    rect_mask = (idxs >= -width + 1) & (idxs <= 0)
+    kernel = rect_mask.astype(jnp.float32)
+    return kernel / kernel.sum()
 
 def moving_average(
     x: jnp.ndarray, window_size: float, is_training: bool = True
@@ -263,28 +309,11 @@ def moving_average(
     Differentiable, fractional window moving average with a softmax or rectangle kernel.
     """
 
-    half = MAX_KERNEL_SIZE // 2
-    idxs = jnp.arange(-half, half + 1)
+    if is_training:
+        kernel = softmax_kernel(window_size)
+    else:
+        kernel = rectangle_kernel(window_size)
 
-    def get_kernel():
-        # Only use current and past (causal) indices
-        mask = idxs <= 0
-        causal_idxs = idxs * mask
-        if is_training:
-            # Causal softmax kernel: only current and past
-            # Set future weights to -inf so softmax is zero there
-            logits = -((causal_idxs / window_size) ** 2)
-            logits = jnp.where(mask, logits, -jnp.inf)
-            kernel = jax.nn.softmax(logits)
-            return kernel / kernel.sum()
-        else:
-            # Causal rectangle kernel (uniform over window_size samples)
-            width = jnp.clip(window_size, 1.0, MAX_KERNEL_SIZE)
-            rect_mask = (idxs >= -width + 1) & (idxs <= 0)
-            kernel = rect_mask.astype(jnp.float32)
-            return kernel / kernel.sum()
-
-    kernel = get_kernel()
     return jnp.convolve(x, kernel, mode="same")
 
 
@@ -437,60 +466,44 @@ def main() -> None:
 
     params = TransientDetectorParameters()
 
-    # Plot predictions before optimization
-    os.makedirs("data/plots/chunk_preds", exist_ok=True)
-    for i, chunk in enumerate(chunks[:5]):
-        audio_jnp = jnp.asarray(chunk.audio)
-        pred = transient_detector(
-            params, audio_jnp, chunk.sample_rate, do_debug=True, is_training=False
-        )
-        out_path = f"data/plots/chunk_preds/chunk_{i + 1}_pred.png"
-        plot_chunk_with_prediction(
-            chunk,
-            pred,
-            out_path,
-            duration_s=min(5.0, len(chunk.audio) / chunk.sample_rate),
-        )
-        print(f"Plotted prediction for chunk {i + 1} to {out_path}")
+
+    # Plot predictions before optimization (eval kernel)
+    plot_predictions(
+        chunks,
+        params,
+        output_dir="data/plots/chunk_preds",
+        is_training=False,
+        do_debug=True,
+        prefix="",
+        print_prefix="",
+    )
 
     # Plot predictions with training (softmax) kernel
-    os.makedirs("data/plots/chunk_preds_training", exist_ok=True)
-    for i, chunk in enumerate(chunks[:5]):
-        audio_jnp = jnp.asarray(chunk.audio)
-        pred = transient_detector(
-            params, audio_jnp, chunk.sample_rate, do_debug=True, is_training=True
-        )
-        out_path = f"data/plots/chunk_preds_training/chunk_{i + 1}_pred.png"
-        plot_chunk_with_prediction(
-            chunk,
-            pred,
-            out_path,
-            duration_s=min(5.0, len(chunk.audio) / chunk.sample_rate),
-        )
-        print(f"Plotted training kernel prediction for chunk {i + 1} to {out_path}")
+    plot_predictions(
+        chunks,
+        params,
+        output_dir="data/plots/chunk_preds_training",
+        is_training=True,
+        do_debug=True,
+        prefix="",
+        print_prefix="Training kernel: ",
+    )
 
-    return
     # Optimize parameters
     print("Optimizing transient detector parameters...")
     opt_params = optimize_transient_detector(chunks)
     print(f"Optimized parameters: {opt_params}")
 
     # Plot predictions after optimization
-    os.makedirs("data/plots/chunk_preds_optimized", exist_ok=True)
-    for i, chunk in enumerate(chunks[:5]):
-        audio_jnp = jnp.asarray(chunk.audio)
-        pred = transient_detector(
-            opt_params, audio_jnp, chunk.sample_rate, do_debug=True, is_training=False
-        )
-        out_path = f"data/plots/chunk_preds_optimized/chunk_{i + 1}_pred.png"
-        plot_chunk_with_prediction(
-            chunk,
-            pred,
-            out_path,
-            duration_s=min(5.0, len(chunk.audio) / chunk.sample_rate),
-        )
-        print(f"Plotted optimized prediction for chunk {i + 1} to {out_path}")
-
+    plot_predictions(
+        chunks,
+        opt_params,
+        output_dir="data/plots/chunk_preds_optimized",
+        is_training=False,
+        do_debug=True,
+        prefix="",
+        print_prefix="Optimized: ",
+    )
 
 if __name__ == "__main__":
     main()
