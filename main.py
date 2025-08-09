@@ -1,11 +1,11 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, astuple
 import numpy as np
 from scipy.io import wavfile
 import os
 import matplotlib.pyplot as plt
 import random
 from typing import Dict, List, Union
-
+import scipy.optimize
 import jax.numpy as jnp
 import jax
 
@@ -236,6 +236,8 @@ class TransientDetectorParameters:
     w0: float = 0.0            # bias term
     w1: float = 20.0            # fast_env weight
     w2: float = -20.0           # slow_env weight
+    post_gain: float = 1.0
+    post_bias: float = 0.0
 
 def moving_average(x: jnp.ndarray, window_size: float) -> jnp.ndarray:
     """
@@ -265,9 +267,10 @@ def transient_detector(
 
     envelop1 = moving_average(power, envelop1_window_samples)
     envelop2 = moving_average(power, envelop2_window_samples)
-    # New formula: sigmoid(w0 + w1 * envelop1 + w2 * envelop2)
+
     inner = params.w0 + params.w1 * envelop1 + params.w2 * envelop2
-    result = jax.nn.sigmoid(inner)
+    outer = params.post_gain * inner + params.post_bias
+    result = jax.nn.sigmoid(outer)
 
     if do_debug:
         global _dbg_n
@@ -278,6 +281,7 @@ def transient_detector(
             'envelop1': envelop1,
             'envelop2': envelop2,
             'inner': inner,
+            'outer': outer,
             'result': result
         })
         _dbg_n += 1
@@ -293,10 +297,6 @@ def loss_function(target: jnp.ndarray, prediction: jnp.ndarray) -> jnp.ndarray:
 
 
 def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDetectorParameters:
-    import scipy.optimize
-    import numpy as np
-
-
     # Prepare arrays for vmap
     audio_arrs = [jnp.asarray(chunk.audio) for chunk in chunks]
     label_arrs = [jnp.asarray(chunk.label_array) for chunk in chunks]
@@ -320,8 +320,8 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
     valid_lengths = jax.device_put(valid_lengths, device)
 
     def chunk_loss(params_array, audio, label, sample_rate, valid_len):
-        fast_window, slow_window, w0, w1, w2 = params_array
-        params = TransientDetectorParameters(fast_window=fast_window, slow_window=slow_window, w0=w0, w1=w1, w2=w2)
+        fast_window, slow_window, w0, w1, w2, post_gain, post_bias = params_array
+        params = TransientDetectorParameters(fast_window=fast_window, slow_window=slow_window, w0=w0, w1=w1, w2=w2, post_gain=post_gain, post_bias=post_bias)
         pred = transient_detector(params, audio, sample_rate)
         # Create mask for valid (unpadded) region
         mask = jnp.arange(label.shape[0]) < valid_len
@@ -344,27 +344,21 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
     # JAX grad for the loss function
     loss_grad = jax.grad(lambda p: loss_for_params(p))
 
-    # Initial guess: [fast_window, slow_window, w0, w1, w2] from dataclass defaults
     default_params = TransientDetectorParameters()
-    x0 = np.array([
-        default_params.fast_window,
-        default_params.slow_window,
-        default_params.w0,
-        default_params.w1,
-        default_params.w2
-    ], dtype=np.float32)
+    x0 = np.array(astuple(default_params), dtype=np.float32)
     bounds = [
         (1e-3, MAX_WINDOW_SIZE),  # fast_window
         (1e-3, MAX_WINDOW_SIZE),  # slow_window
         (-500.0, 500.0),              # w0 (bias)
         (-500.0, 500.0),            # w1 (fast_env weight)
         (-500.0, 500.0),            # w2 (slow_env weight)
+        (-1e4, 1e4),          # post_gain
+        (-1.0, 1.0)           # post_bias
     ]
-
 
     # Progress display callback
     def progress_callback(xk):
-        print(f"Current params: fast_window={xk[0]:.4f}, slow_window={xk[1]:.4f}, w0={xk[2]:.4f}, w1={xk[3]:.4f}, w2={xk[4]:.4f}")
+        print(f"Current: {TransientDetectorParameters(*xk)}")
 
     result = scipy.optimize.minimize(
         loss_for_params,
@@ -376,8 +370,7 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
         callback=progress_callback
     )
 
-    fast_window, slow_window, w0, w1, w2 = result.x
-    return TransientDetectorParameters(fast_window=fast_window, slow_window=slow_window, w0=w0, w1=w1, w2=w2)
+    return TransientDetectorParameters(*result.x)
 
 def main() -> None:
     # Load and plot an example
