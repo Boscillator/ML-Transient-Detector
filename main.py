@@ -310,7 +310,8 @@ def moving_average(
     """
 
     if is_training:
-        kernel = softmax_kernel(window_size)
+        # kernel = softmax_kernel(window_size)
+        kernel = rectangle_kernel(window_size)
     else:
         kernel = rectangle_kernel(window_size)
 
