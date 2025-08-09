@@ -225,8 +225,8 @@ class TransientDetectorParameters:
     fast_window: float = 0.01  # in seconds (can be fractional for differentiability)
     slow_window: float = 0.1   # in seconds (can be fractional for differentiability)
     w0: float = 0.0            # bias term
-    w1: float = 5.0            # fast_env weight
-    w2: float = -5.0           # slow_env weight
+    w1: float = 20.0            # fast_env weight
+    w2: float = -20.0           # slow_env weight
 
 def moving_average(x: jnp.ndarray, window_size: float, sample_rate: float) -> jnp.ndarray:
     """
@@ -261,7 +261,8 @@ def transient_detector(
     fast_env = moving_average(power, fast_window_samples, sample_rate)
     slow_env = moving_average(power, slow_window_samples, sample_rate)
     # New formula: sigmoid(w0 + w1 * fast_env + w2 * slow_env)
-    result = jax.nn.sigmoid(params.w0 + params.w1 * fast_env + params.w2 * slow_env)
+    inner = params.w0 + params.w1 * fast_env + params.w2 * slow_env
+    result = jax.nn.sigmoid(inner)
 
     if do_debug:
         global _dbg_n
@@ -271,6 +272,7 @@ def transient_detector(
             'power': power,
             'fast_env': fast_env,
             'slow_env': slow_env,
+            'inner': inner,
             'result': result
         })
         _dbg_n += 1
@@ -321,10 +323,15 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
     bounds = [
         (1e-3, MAX_WINDOW_SIZE),  # fast_window
         (1e-3, MAX_WINDOW_SIZE),  # slow_window
-        (-5.0, 5.0),              # w0 (bias)
-        (-10.0, 10.0),            # w1 (fast_env weight)
-        (-10.0, 10.0),            # w2 (slow_env weight)
+        (-100.0, 100.0),              # w0 (bias)
+        (-100.0, 100.0),            # w1 (fast_env weight)
+        (-100.0, 100.0),            # w2 (slow_env weight)
     ]
+
+
+    # Progress display callback
+    def progress_callback(xk):
+        print(f"Current params: fast_window={xk[0]:.4f}, slow_window={xk[1]:.4f}, w0={xk[2]:.4f}, w1={xk[3]:.4f}, w2={xk[4]:.4f}")
 
     result = scipy.optimize.minimize(
         loss_for_params,
@@ -332,7 +339,8 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
         method='L-BFGS-B',
         jac=loss_grad,
         bounds=bounds,
-        options={'disp': True, 'maxiter': 100}
+        options={'disp': True},
+        callback=progress_callback
     )
 
     fast_window, slow_window, w0, w1, w2 = result.x
@@ -343,6 +351,7 @@ def main() -> None:
     base_path = 'data/export/DarkIllusion_ElecGtr5DI'
     example = load_transient_example(base_path)
     chunks = chunkify_examples(example)
+    chunks = chunks[:5]  # Limit to first 10 chunks for testing
 
 
     # Plot predictions before optimization
@@ -355,18 +364,16 @@ def main() -> None:
         plot_chunk_with_prediction(chunk, pred, out_path, duration_s=min(5.0, len(chunk.audio)/chunk.sample_rate))
         print(f"Plotted prediction for chunk {i+1} to {out_path}")
 
-    return
-
     # Optimize parameters
     print("Optimizing transient detector parameters...")
     opt_params = optimize_transient_detector(chunks)
-    print(f"Optimized parameters: fast_window={opt_params.fast_window}, slow_window={opt_params.slow_window}, threshold={opt_params.threshold}")
+    print(f"Optimized parameters: {opt_params}")
 
     # Plot predictions after optimization
     os.makedirs('data/plots/chunk_preds_optimized', exist_ok=True)
     for i, chunk in enumerate(chunks[:5]):
         audio_jnp = jnp.asarray(chunk.audio)
-        pred = transient_detector(opt_params, audio_jnp, chunk.sample_rate)
+        pred = transient_detector(opt_params, audio_jnp, chunk.sample_rate, do_debug=True)
         out_path = f'data/plots/chunk_preds_optimized/chunk_{i+1}_pred.png'
         plot_chunk_with_prediction(chunk, pred, out_path, duration_s=min(5.0, len(chunk.audio)/chunk.sample_rate))
         print(f"Plotted optimized prediction for chunk {i+1} to {out_path}")
