@@ -8,8 +8,14 @@ from typing import Dict, List, Union
 import jax.numpy as jnp
 import jax
 
+
 # Maximum window size for moving average (in seconds)
 MAX_WINDOW_SIZE = 0.5  # seconds, must match optimizer bounds
+# Assumed sample rate for kernel size
+ASSUME_SAMPLE_RATE = 48000
+# Kernel size for moving average (must be odd)
+MAX_KERNEL_SIZE = int(round(MAX_WINDOW_SIZE * ASSUME_SAMPLE_RATE))
+MAX_KERNEL_SIZE = MAX_KERNEL_SIZE + (MAX_KERNEL_SIZE + 1) % 2
 
 @dataclass
 class TransientExample:
@@ -228,16 +234,12 @@ class TransientDetectorParameters:
     w1: float = 20.0            # fast_env weight
     w2: float = -20.0           # slow_env weight
 
-def moving_average(x: jnp.ndarray, window_size: float, sample_rate: float) -> jnp.ndarray:
+def moving_average(x: jnp.ndarray, window_size: float) -> jnp.ndarray:
     """
     Differentiable, fractional window moving average with a softmax kernel.
-    max_win is set to cover the largest window size allowed by optimizer bounds (5.0s) at the given sample rate.
+    Uses global MAX_KERNEL_SIZE (must be odd).
     """
-    max_win = int(MAX_WINDOW_SIZE * sample_rate)
-    # Ensure max_win is odd for symmetry
-    if max_win % 2 == 0:
-        max_win += 1
-    half = max_win // 2
+    half = MAX_KERNEL_SIZE // 2
     idxs = jnp.arange(-half, half + 1)
     # Softmax kernel centered at 0, width controlled by window_size
     kernel = jax.nn.softmax(-((idxs / window_size) ** 2))
@@ -253,15 +255,15 @@ def transient_detector(
     do_debug: bool = False
 ) -> jnp.ndarray:
     # Convert window sizes from seconds to samples
-    fast_window_samples = params.fast_window * sample_rate
-    slow_window_samples = params.slow_window * sample_rate
+    envelop1_window_samples = params.fast_window * sample_rate
+    envelop2_window_samples = params.slow_window * sample_rate
 
     power = jnp.abs(audio)
 
-    fast_env = moving_average(power, fast_window_samples, sample_rate)
-    slow_env = moving_average(power, slow_window_samples, sample_rate)
-    # New formula: sigmoid(w0 + w1 * fast_env + w2 * slow_env)
-    inner = params.w0 + params.w1 * fast_env + params.w2 * slow_env
+    envelop1 = moving_average(power, envelop1_window_samples)
+    envelop2 = moving_average(power, envelop2_window_samples)
+    # New formula: sigmoid(w0 + w1 * envelop1 + w2 * envelop2)
+    inner = params.w0 + params.w1 * envelop1 + params.w2 * envelop2
     result = jax.nn.sigmoid(inner)
 
     if do_debug:
@@ -270,8 +272,8 @@ def transient_detector(
         internal_debug(_dbg_n, {
             'audio': audio,
             'power': power,
-            'fast_env': fast_env,
-            'slow_env': slow_env,
+            'envelop1': envelop1,
+            'envelop2': envelop2,
             'inner': inner,
             'result': result
         })
@@ -292,21 +294,39 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
     import numpy as np
 
 
-    def loss_for_params(param_array):
-        # param_array: [fast_window, slow_window, w0, w1, w2]
-        fast_window, slow_window, w0, w1, w2 = param_array
+    # Prepare arrays for vmap
+    audio_arrs = [jnp.asarray(chunk.audio) for chunk in chunks]
+    label_arrs = [jnp.asarray(chunk.label_array) for chunk in chunks]
+    sample_rates = [chunk.sample_rate for chunk in chunks]
+
+    # Pad all arrays to the same length for batching
+    max_len = max(len(a) for a in audio_arrs)
+    def pad(arr, length):
+        return jnp.pad(arr, (0, length - len(arr)), constant_values=0)
+    audio_batch = jnp.stack([pad(a, max_len) for a in audio_arrs])
+    label_batch = jnp.stack([pad(l, max_len) for l in label_arrs])
+    sample_rate_batch = jnp.array(sample_rates)
+    valid_lengths = jnp.array([len(a) for a in audio_arrs])
+
+    def chunk_loss(params_array, audio, label, sample_rate, valid_len):
+        fast_window, slow_window, w0, w1, w2 = params_array
         params = TransientDetectorParameters(fast_window=fast_window, slow_window=slow_window, w0=w0, w1=w1, w2=w2)
-        total_loss = 0.0
-        total_count = 0
-        for chunk in chunks:
-            audio_jnp = jnp.asarray(chunk.audio)
-            label_jnp = jnp.asarray(chunk.label_array)
-            pred = transient_detector(params, audio_jnp, chunk.sample_rate)
-            # Ensure label and pred are same length
-            n = min(len(label_jnp), len(pred))
-            total_loss += loss_function(label_jnp[:n], pred[:n]) * n
-            total_count += n
-        return total_loss / max(1, total_count)
+        pred = transient_detector(params, audio, sample_rate)
+        # Create mask for valid (unpadded) region
+        mask = jnp.arange(label.shape[0]) < valid_len
+        # Compute loss over all elements, mask out padded region
+        loss = loss_function(label, pred)
+        # Masked mean: sum only valid elements
+        masked_loss = jnp.sum(loss * mask) / jnp.maximum(1, jnp.sum(mask))
+        return masked_loss * valid_len, valid_len
+
+    v_chunk_loss = jax.vmap(chunk_loss, in_axes=(None, 0, 0, 0, 0))
+
+    def loss_for_params(param_array):
+        losses, counts = v_chunk_loss(param_array, audio_batch, label_batch, sample_rate_batch, valid_lengths)
+        total_loss = jnp.sum(losses)
+        total_count = jnp.sum(counts)
+        return total_loss / jnp.maximum(1, total_count)
 
     # JAX grad for the loss function
     loss_grad = jax.grad(lambda p: loss_for_params(p))
@@ -323,9 +343,9 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
     bounds = [
         (1e-3, MAX_WINDOW_SIZE),  # fast_window
         (1e-3, MAX_WINDOW_SIZE),  # slow_window
-        (-100.0, 100.0),              # w0 (bias)
-        (-100.0, 100.0),            # w1 (fast_env weight)
-        (-100.0, 100.0),            # w2 (slow_env weight)
+        (-500.0, 500.0),              # w0 (bias)
+        (-500.0, 500.0),            # w1 (fast_env weight)
+        (-500.0, 500.0),            # w2 (slow_env weight)
     ]
 
 
