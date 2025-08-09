@@ -207,12 +207,26 @@ def internal_debug(i: int, data: Dict[str, Union[np.ndarray, jnp.ndarray, float]
     plt.savefig(out_path)
     plt.close(fig)
 
+
+def plot_chunks(
+    chunks: List[TransientExample],
+    out_dir: str = "data/plots/chunks"
+) -> None:
+    """Plot the first 5 chunks using plot_transient_example."""
+    os.makedirs(out_dir, exist_ok=True)
+    for i, chunk in enumerate(chunks[:5]):
+        out_path = os.path.join(out_dir, f"chunk_{i+1}.png")
+        plot_transient_example(chunk, out_path)
+    print(f"Plotted {min(5, len(chunks))} chunks to {out_dir}")
+
 @jax.tree_util.register_dataclass
 @dataclass
 class TransientDetectorParameters:
-    fast_window: float  # in samples (can be fractional for differentiability)
-    slow_window: float  # in samples (can be fractional for differentiability)
-    threshold: float
+    fast_window: float = 0.01  # in seconds (can be fractional for differentiability)
+    slow_window: float = 0.1   # in seconds (can be fractional for differentiability)
+    w0: float = 0.0            # bias term
+    w1: float = 5.0            # fast_env weight
+    w2: float = -5.0           # slow_env weight
 
 def moving_average(x: jnp.ndarray, window_size: float, sample_rate: float) -> jnp.ndarray:
     """
@@ -246,9 +260,8 @@ def transient_detector(
 
     fast_env = moving_average(power, fast_window_samples, sample_rate)
     slow_env = moving_average(power, slow_window_samples, sample_rate)
-    diff = fast_env - slow_env
-    # Sigmoid activation for differentiable thresholding
-    result = jax.nn.sigmoid(diff - params.threshold)
+    # New formula: sigmoid(w0 + w1 * fast_env + w2 * slow_env)
+    result = jax.nn.sigmoid(params.w0 + params.w1 * fast_env + params.w2 * slow_env)
 
     if do_debug:
         global _dbg_n
@@ -258,25 +271,11 @@ def transient_detector(
             'power': power,
             'fast_env': fast_env,
             'slow_env': slow_env,
-            'diff': diff,
             'result': result
         })
         _dbg_n += 1
 
     return result
-
-
-def plot_chunks(
-    chunks: List[TransientExample],
-    out_dir: str = "data/plots/chunks"
-) -> None:
-    """Plot the first 5 chunks using plot_transient_example."""
-    os.makedirs(out_dir, exist_ok=True)
-    for i, chunk in enumerate(chunks[:5]):
-        out_path = os.path.join(out_dir, f"chunk_{i+1}.png")
-        plot_transient_example(chunk, out_path)
-    print(f"Plotted {min(5, len(chunks))} chunks to {out_dir}")
-
 
 def loss_function(target: jnp.ndarray, prediction: jnp.ndarray) -> jnp.ndarray:
     # Binary cross entropy loss
@@ -290,10 +289,11 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
     import scipy.optimize
     import numpy as np
 
+
     def loss_for_params(param_array):
-        # param_array: [fast_window, slow_window, threshold] (all in seconds except threshold)
-        fast_window, slow_window, threshold = param_array
-        params = TransientDetectorParameters(fast_window=fast_window, slow_window=slow_window, threshold=threshold)
+        # param_array: [fast_window, slow_window, w0, w1, w2]
+        fast_window, slow_window, w0, w1, w2 = param_array
+        params = TransientDetectorParameters(fast_window=fast_window, slow_window=slow_window, w0=w0, w1=w1, w2=w2)
         total_loss = 0.0
         total_count = 0
         for chunk in chunks:
@@ -309,9 +309,22 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
     # JAX grad for the loss function
     loss_grad = jax.grad(lambda p: loss_for_params(p))
 
-    # Initial guess: [fast_window, slow_window, threshold]
-    x0 = np.array([0.01, 0.5, 0.1], dtype=np.float32)
-    bounds = [(1e-3, MAX_WINDOW_SIZE), (1e-3, MAX_WINDOW_SIZE), (0.0, 1.0)]  # reasonable bounds
+    # Initial guess: [fast_window, slow_window, w0, w1, w2] from dataclass defaults
+    default_params = TransientDetectorParameters()
+    x0 = np.array([
+        default_params.fast_window,
+        default_params.slow_window,
+        default_params.w0,
+        default_params.w1,
+        default_params.w2
+    ], dtype=np.float32)
+    bounds = [
+        (1e-3, MAX_WINDOW_SIZE),  # fast_window
+        (1e-3, MAX_WINDOW_SIZE),  # slow_window
+        (-5.0, 5.0),              # w0 (bias)
+        (-10.0, 10.0),            # w1 (fast_env weight)
+        (-10.0, 10.0),            # w2 (slow_env weight)
+    ]
 
     result = scipy.optimize.minimize(
         loss_for_params,
@@ -322,8 +335,8 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
         options={'disp': True, 'maxiter': 100}
     )
 
-    fast_window, slow_window, threshold = result.x
-    return TransientDetectorParameters(fast_window=fast_window, slow_window=slow_window, threshold=threshold)
+    fast_window, slow_window, w0, w1, w2 = result.x
+    return TransientDetectorParameters(fast_window=fast_window, slow_window=slow_window, w0=w0, w1=w1, w2=w2)
 
 def main() -> None:
     # Load and plot an example
@@ -333,7 +346,7 @@ def main() -> None:
 
 
     # Plot predictions before optimization
-    params = TransientDetectorParameters(fast_window=0.01, slow_window=0.1, threshold=0.1)
+    params = TransientDetectorParameters()
     os.makedirs('data/plots/chunk_preds', exist_ok=True)
     for i, chunk in enumerate(chunks[:5]):
         audio_jnp = jnp.asarray(chunk.audio)
