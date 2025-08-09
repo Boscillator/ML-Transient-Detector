@@ -261,21 +261,28 @@ def moving_average(
 ) -> jnp.ndarray:
     """
     Differentiable, fractional window moving average with a softmax or rectangle kernel.
-    Uses global MAX_KERNEL_SIZE (must be odd).
     """
+
     half = MAX_KERNEL_SIZE // 2
     idxs = jnp.arange(-half, half + 1)
 
     def get_kernel():
+        # Only use current and past (causal) indices
+        mask = idxs <= 0
+        causal_idxs = idxs * mask
         if is_training:
-            # Softmax kernel centered at 0, width controlled by window_size
-            kernel = jax.nn.softmax(-((idxs / window_size) ** 2))
+            # Causal softmax kernel: only current and past
+            # Set future weights to -inf so softmax is zero there
+            logits = -((causal_idxs / window_size) ** 2)
+            logits = jnp.where(mask, logits, -jnp.inf)
+            kernel = jax.nn.softmax(logits)
+            return kernel / kernel.sum()
         else:
-            # Rectangle kernel (uniform)
+            # Causal rectangle kernel (uniform over window_size samples)
             width = jnp.clip(window_size, 1.0, MAX_KERNEL_SIZE)
-            mask = (jnp.abs(idxs) <= (width // 2)).astype(jnp.float32)
-            kernel = mask
-        return kernel / kernel.sum()
+            rect_mask = (idxs >= -width + 1) & (idxs <= 0)
+            kernel = rect_mask.astype(jnp.float32)
+            return kernel / kernel.sum()
 
     kernel = get_kernel()
     return jnp.convolve(x, kernel, mode="same")
@@ -428,8 +435,9 @@ def main() -> None:
     chunks = chunkify_examples(example)
     chunks = chunks[:5]  # Limit to first 10 chunks for testing
 
-    # Plot predictions before optimization
     params = TransientDetectorParameters()
+
+    # Plot predictions before optimization
     os.makedirs("data/plots/chunk_preds", exist_ok=True)
     for i, chunk in enumerate(chunks[:5]):
         audio_jnp = jnp.asarray(chunk.audio)
@@ -445,6 +453,23 @@ def main() -> None:
         )
         print(f"Plotted prediction for chunk {i + 1} to {out_path}")
 
+    # Plot predictions with training (softmax) kernel
+    os.makedirs("data/plots/chunk_preds_training", exist_ok=True)
+    for i, chunk in enumerate(chunks[:5]):
+        audio_jnp = jnp.asarray(chunk.audio)
+        pred = transient_detector(
+            params, audio_jnp, chunk.sample_rate, do_debug=True, is_training=True
+        )
+        out_path = f"data/plots/chunk_preds_training/chunk_{i + 1}_pred.png"
+        plot_chunk_with_prediction(
+            chunk,
+            pred,
+            out_path,
+            duration_s=min(5.0, len(chunk.audio) / chunk.sample_rate),
+        )
+        print(f"Plotted training kernel prediction for chunk {i + 1} to {out_path}")
+
+    return
     # Optimize parameters
     print("Optimizing transient detector parameters...")
     opt_params = optimize_transient_detector(chunks)
