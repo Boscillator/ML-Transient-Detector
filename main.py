@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import jax
 
 # Set this to 'cpu' or 'gpu' to control device placement
-DEVICE = 'gpu'  # or 'cpu'
+DEVICE = "gpu"  # or 'cpu'
 
 # Maximum window size for moving average (in seconds)
 MAX_WINDOW_SIZE = 0.5  # seconds, must match optimizer bounds
@@ -19,6 +19,7 @@ ASSUME_SAMPLE_RATE = 48000
 # Kernel size for moving average (must be odd)
 MAX_KERNEL_SIZE = int(round(MAX_WINDOW_SIZE * ASSUME_SAMPLE_RATE))
 MAX_KERNEL_SIZE = MAX_KERNEL_SIZE + (MAX_KERNEL_SIZE + 1) % 2
+
 
 @dataclass
 class TransientExample:
@@ -72,10 +73,7 @@ def load_wav_mono_normalized(filepath: str) -> tuple[np.ndarray, int]:
 
 
 def generate_label_array(
-    transient_times: list[float],
-    audio_length: int,
-    sr: int,
-    window_s: float = 0.01
+    transient_times: list[float], audio_length: int, sr: int, window_s: float = 0.01
 ) -> np.ndarray:
     """
     Generate a label array (0.0/1.0) for the given transient times.
@@ -91,9 +89,7 @@ def generate_label_array(
 
 
 def plot_transient_example(
-    example: TransientExample,
-    out_path: str,
-    duration_s: float = 1.0
+    example: TransientExample, out_path: str, duration_s: float = 1.0
 ) -> None:
     """Plot the audio and label array of a TransientExample and save to out_path. Plots up to duration_s seconds."""
     audio = example.audio
@@ -104,24 +100,27 @@ def plot_transient_example(
     t = np.arange(max_samples) / sr
 
     fig, ax1 = plt.subplots(figsize=(12, 4))
-    ax1.plot(t, audio[:max_samples], label='Audio', color='C0', linewidth=0.8)
-    ax1.set_ylabel('Audio')
-    ax1.set_xlabel('Time (s)')
+    ax1.plot(t, audio[:max_samples], label="Audio", color="C0", linewidth=0.8)
+    ax1.set_ylabel("Audio")
+    ax1.set_xlabel("Time (s)")
     ax2 = ax1.twinx()
-    ax2.plot(t, label[:max_samples], label='Label', color='C1', alpha=0.5, linewidth=1.5)
-    ax2.set_ylabel('Label (0/1)')
-    ax1.set_title(f'Audio and Transient Label (First {duration_s} Second(s))')
+    ax2.plot(
+        t, label[:max_samples], label="Label", color="C1", alpha=0.5, linewidth=1.5
+    )
+    ax2.set_ylabel("Label (0/1)")
+    ax1.set_title(f"Audio and Transient Label (First {duration_s} Second(s))")
     ax1.set_xlim(0, duration_s)
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path)
     plt.close(fig)
 
+
 def chunkify_examples(
     example: "TransientExample",
     min_length_s: float = 5.0,
     max_length_s: float = 5.0,
-    overlap_s: float = 1.0
+    overlap_s: float = 1.0,
 ) -> List["TransientExample"]:
     """
     Split a TransientExample into overlapping chunks of random length.
@@ -144,13 +143,17 @@ def chunkify_examples(
         # Find transients in this chunk, adjust to chunk-relative time
         chunk_start_time = start_sample / sr
         chunk_end_time = end_sample / sr
-        chunk_transients = [t - chunk_start_time for t in transients if chunk_start_time <= t < chunk_end_time]
+        chunk_transients = [
+            t - chunk_start_time
+            for t in transients
+            if chunk_start_time <= t < chunk_end_time
+        ]
         # Create chunk TransientExample
         chunk = TransientExample(
             audio=audio_chunk,
             label_array=label_chunk,
             transient_times=chunk_transients,
-            sample_rate=sr
+            sample_rate=sr,
         )
         chunks.append(chunk)
         # Advance start_sample with overlap
@@ -166,11 +169,13 @@ def plot_chunk_with_prediction(
     chunk: TransientExample,
     prediction: jnp.ndarray,
     out_path: str = "data/plots/chunk_with_prediction.png",
-    duration_s: float = 1.0
+    duration_s: float = 1.0,
 ) -> None:
     import jax.numpy as jnp
+
     """Plot the audio, label, and prediction for a chunk."""
     import matplotlib.pyplot as plt
+
     audio = chunk.audio
     label = chunk.label_array
     sr = chunk.sample_rate
@@ -181,8 +186,17 @@ def plot_chunk_with_prediction(
     ax1.set_ylabel("Audio")
     ax1.set_xlabel("Time (s)")
     ax2 = ax1.twinx()
-    ax2.plot(t, label[:max_samples], label="Label", color="C1", alpha=0.5, linewidth=1.5)
-    ax2.plot(t, np.asarray(prediction[:max_samples]), label="Prediction", color="C3", alpha=0.7, linewidth=1.5)
+    ax2.plot(
+        t, label[:max_samples], label="Label", color="C1", alpha=0.5, linewidth=1.5
+    )
+    ax2.plot(
+        t,
+        np.asarray(prediction[:max_samples]),
+        label="Prediction",
+        color="C3",
+        alpha=0.7,
+        linewidth=1.5,
+    )
     ax2.set_ylabel("Label / Prediction")
     ax1.set_title(f"Audio, Label, and Prediction (First {duration_s} Second(s))")
     ax1.set_xlim(0, duration_s)
@@ -192,10 +206,12 @@ def plot_chunk_with_prediction(
     plt.savefig(out_path)
     plt.close(fig)
 
+
 def internal_debug(i: int, data: Dict[str, Union[np.ndarray, jnp.ndarray, float]]):
     import matplotlib.pyplot as plt
     import os
-    os.makedirs('data/plots/debug', exist_ok=True)
+
+    os.makedirs("data/plots/debug", exist_ok=True)
     keys = list(data.keys())
     n = len(keys)
     fig, axes = plt.subplots(n, 1, figsize=(12, 2.5 * n), sharex=True)
@@ -210,36 +226,39 @@ def internal_debug(i: int, data: Dict[str, Union[np.ndarray, jnp.ndarray, float]
             ax.plot([val])
         ax.set_ylabel(key)
         ax.set_title(key)
-    axes[-1].set_xlabel('Index')
+    axes[-1].set_xlabel("Index")
     fig.tight_layout()
-    out_path = f'data/plots/debug/{i}.png'
+    out_path = f"data/plots/debug/{i}.png"
     plt.savefig(out_path)
     plt.close(fig)
 
 
 def plot_chunks(
-    chunks: List[TransientExample],
-    out_dir: str = "data/plots/chunks"
+    chunks: List[TransientExample], out_dir: str = "data/plots/chunks"
 ) -> None:
     """Plot the first 5 chunks using plot_transient_example."""
     os.makedirs(out_dir, exist_ok=True)
     for i, chunk in enumerate(chunks[:5]):
-        out_path = os.path.join(out_dir, f"chunk_{i+1}.png")
+        out_path = os.path.join(out_dir, f"chunk_{i + 1}.png")
         plot_transient_example(chunk, out_path)
     print(f"Plotted {min(5, len(chunks))} chunks to {out_dir}")
+
 
 @jax.tree_util.register_dataclass
 @dataclass
 class TransientDetectorParameters:
     fast_window: float = 0.01  # in seconds (can be fractional for differentiability)
-    slow_window: float = 0.1   # in seconds (can be fractional for differentiability)
-    w0: float = 0.0            # bias term
-    w1: float = 20.0            # fast_env weight
-    w2: float = -20.0           # slow_env weight
+    slow_window: float = 0.1  # in seconds (can be fractional for differentiability)
+    w0: float = 0.0  # bias term
+    w1: float = 20.0  # fast_env weight
+    w2: float = -20.0  # slow_env weight
     post_gain: float = 1.0
     post_bias: float = 0.0
 
-def moving_average(x: jnp.ndarray, window_size: float, is_training: bool = True) -> jnp.ndarray:
+
+def moving_average(
+    x: jnp.ndarray, window_size: float, is_training: bool = True
+) -> jnp.ndarray:
     """
     Differentiable, fractional window moving average with a softmax or rectangle kernel.
     Uses global MAX_KERNEL_SIZE (must be odd).
@@ -259,16 +278,18 @@ def moving_average(x: jnp.ndarray, window_size: float, is_training: bool = True)
         return kernel / kernel.sum()
 
     kernel = get_kernel()
-    return jnp.convolve(x, kernel, mode='same')
+    return jnp.convolve(x, kernel, mode="same")
+
 
 _dbg_n = 0
+
 
 def transient_detector(
     params: TransientDetectorParameters,
     audio: jnp.ndarray,
     sample_rate: float,
     do_debug: bool = False,
-    is_training: bool = True
+    is_training: bool = True,
 ) -> jnp.ndarray:
     # Convert window sizes from seconds to samples
     envelop1_window_samples = params.fast_window * sample_rate
@@ -279,7 +300,6 @@ def transient_detector(
     envelop1 = moving_average(power, envelop1_window_samples, is_training=is_training)
     envelop2 = moving_average(power, envelop2_window_samples, is_training=is_training)
 
-
     inner = params.w0 + params.w1 * envelop1 + params.w2 * envelop2
     outer = params.post_gain * inner + params.post_bias
     result = jax.nn.sigmoid(outer)
@@ -287,28 +307,34 @@ def transient_detector(
     if do_debug:
         global _dbg_n
         # Internal debug plotting
-        internal_debug(_dbg_n, {
-            'audio': audio,
-            'power': power,
-            'envelop1': envelop1,
-            'envelop2': envelop2,
-            'inner': inner,
-            'outer': outer,
-            'result': result
-        })
+        internal_debug(
+            _dbg_n,
+            {
+                "audio": audio,
+                "power": power,
+                "envelop1": envelop1,
+                "envelop2": envelop2,
+                "inner": inner,
+                "outer": outer,
+                "result": result,
+            },
+        )
         _dbg_n += 1
 
     return result
+
 
 def loss_function(target: jnp.ndarray, prediction: jnp.ndarray) -> jnp.ndarray:
     # Binary cross entropy loss
     eps = 1e-7
     prediction = jnp.clip(prediction, eps, 1 - eps)
-    loss = - (target * jnp.log(prediction) + (1 - target) * jnp.log(1 - prediction))
+    loss = -(target * jnp.log(prediction) + (1 - target) * jnp.log(1 - prediction))
     return jnp.mean(loss)
 
 
-def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDetectorParameters:
+def optimize_transient_detector(
+    chunks: List[TransientExample],
+) -> TransientDetectorParameters:
     # Prepare arrays for vmap
     audio_arrs = [jnp.asarray(chunk.audio) for chunk in chunks]
     label_arrs = [jnp.asarray(chunk.label_array) for chunk in chunks]
@@ -316,6 +342,7 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
 
     # Pad all arrays to the same length for batching
     max_len = max(len(a) for a in audio_arrs)
+
     def pad(arr, length):
         return jnp.pad(arr, (0, length - len(arr)), constant_values=0)
 
@@ -333,7 +360,15 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
 
     def chunk_loss(params_array, audio, label, sample_rate, valid_len):
         fast_window, slow_window, w0, w1, w2, post_gain, post_bias = params_array
-        params = TransientDetectorParameters(fast_window=fast_window, slow_window=slow_window, w0=w0, w1=w1, w2=w2, post_gain=post_gain, post_bias=post_bias)
+        params = TransientDetectorParameters(
+            fast_window=fast_window,
+            slow_window=slow_window,
+            w0=w0,
+            w1=w1,
+            w2=w2,
+            post_gain=post_gain,
+            post_bias=post_bias,
+        )
         pred = transient_detector(params, audio, sample_rate, is_training=True)
         # Create mask for valid (unpadded) region
         mask = jnp.arange(label.shape[0]) < valid_len
@@ -345,10 +380,11 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
 
     v_chunk_loss = jax.vmap(chunk_loss, in_axes=(None, 0, 0, 0, 0))
 
-
     @jax.jit
     def loss_for_params(param_array):
-        losses, counts = v_chunk_loss(param_array, audio_batch, label_batch, sample_rate_batch, valid_lengths)
+        losses, counts = v_chunk_loss(
+            param_array, audio_batch, label_batch, sample_rate_batch, valid_lengths
+        )
         total_loss = jnp.sum(losses)
         total_count = jnp.sum(counts)
         return total_loss / jnp.maximum(1, total_count)
@@ -361,11 +397,11 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
     bounds = [
         (1e-3, MAX_WINDOW_SIZE),  # fast_window
         (1e-3, MAX_WINDOW_SIZE),  # slow_window
-        (-500.0, 500.0),              # w0 (bias)
-        (-500.0, 500.0),            # w1 (fast_env weight)
-        (-500.0, 500.0),            # w2 (slow_env weight)
-        (-1e4, 1e4),          # post_gain
-        (-1.0, 1.0)           # post_bias
+        (-500.0, 500.0),  # w0 (bias)
+        (-500.0, 500.0),  # w1 (fast_env weight)
+        (-500.0, 500.0),  # w2 (slow_env weight)
+        (-1e4, 1e4),  # post_gain
+        (-1.0, 1.0),  # post_bias
     ]
 
     # Progress display callback
@@ -375,32 +411,39 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
     result = scipy.optimize.minimize(
         loss_for_params,
         x0,
-        method='L-BFGS-B',
+        method="L-BFGS-B",
         jac=loss_grad,
         bounds=bounds,
-        options={'disp': True},
-        callback=progress_callback
+        options={"disp": True},
+        callback=progress_callback,
     )
 
     return TransientDetectorParameters(*result.x)
 
+
 def main() -> None:
     # Load and plot an example
-    base_path = 'data/export/DarkIllusion_ElecGtr5DI'
+    base_path = "data/export/DarkIllusion_ElecGtr5DI"
     example = load_transient_example(base_path)
     chunks = chunkify_examples(example)
     chunks = chunks[:5]  # Limit to first 10 chunks for testing
 
-
     # Plot predictions before optimization
     params = TransientDetectorParameters()
-    os.makedirs('data/plots/chunk_preds', exist_ok=True)
+    os.makedirs("data/plots/chunk_preds", exist_ok=True)
     for i, chunk in enumerate(chunks[:5]):
         audio_jnp = jnp.asarray(chunk.audio)
-        pred = transient_detector(params, audio_jnp, chunk.sample_rate, do_debug=True, is_training=False)
-        out_path = f'data/plots/chunk_preds/chunk_{i+1}_pred.png'
-        plot_chunk_with_prediction(chunk, pred, out_path, duration_s=min(5.0, len(chunk.audio)/chunk.sample_rate))
-        print(f"Plotted prediction for chunk {i+1} to {out_path}")
+        pred = transient_detector(
+            params, audio_jnp, chunk.sample_rate, do_debug=True, is_training=False
+        )
+        out_path = f"data/plots/chunk_preds/chunk_{i + 1}_pred.png"
+        plot_chunk_with_prediction(
+            chunk,
+            pred,
+            out_path,
+            duration_s=min(5.0, len(chunk.audio) / chunk.sample_rate),
+        )
+        print(f"Plotted prediction for chunk {i + 1} to {out_path}")
 
     # Optimize parameters
     print("Optimizing transient detector parameters...")
@@ -408,13 +451,20 @@ def main() -> None:
     print(f"Optimized parameters: {opt_params}")
 
     # Plot predictions after optimization
-    os.makedirs('data/plots/chunk_preds_optimized', exist_ok=True)
+    os.makedirs("data/plots/chunk_preds_optimized", exist_ok=True)
     for i, chunk in enumerate(chunks[:5]):
         audio_jnp = jnp.asarray(chunk.audio)
-        pred = transient_detector(opt_params, audio_jnp, chunk.sample_rate, do_debug=True, is_training=False)
-        out_path = f'data/plots/chunk_preds_optimized/chunk_{i+1}_pred.png'
-        plot_chunk_with_prediction(chunk, pred, out_path, duration_s=min(5.0, len(chunk.audio)/chunk.sample_rate))
-        print(f"Plotted optimized prediction for chunk {i+1} to {out_path}")
+        pred = transient_detector(
+            opt_params, audio_jnp, chunk.sample_rate, do_debug=True, is_training=False
+        )
+        out_path = f"data/plots/chunk_preds_optimized/chunk_{i + 1}_pred.png"
+        plot_chunk_with_prediction(
+            chunk,
+            pred,
+            out_path,
+            duration_s=min(5.0, len(chunk.audio) / chunk.sample_rate),
+        )
+        print(f"Plotted optimized prediction for chunk {i + 1} to {out_path}")
 
 
 if __name__ == "__main__":
