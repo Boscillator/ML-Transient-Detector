@@ -5,9 +5,12 @@ import os
 import matplotlib.pyplot as plt
 import random
 from typing import Dict, List, Union
+
 import jax.numpy as jnp
 import jax
 
+# Set this to 'cpu' or 'gpu' to control device placement
+DEVICE = 'gpu'  # or 'cpu'
 
 # Maximum window size for moving average (in seconds)
 MAX_WINDOW_SIZE = 0.5  # seconds, must match optimizer bounds
@@ -116,7 +119,7 @@ def plot_transient_example(
 
 def chunkify_examples(
     example: "TransientExample",
-    min_length_s: float = 3.0,
+    min_length_s: float = 5.0,
     max_length_s: float = 5.0,
     overlap_s: float = 1.0
 ) -> List["TransientExample"]:
@@ -303,10 +306,18 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
     max_len = max(len(a) for a in audio_arrs)
     def pad(arr, length):
         return jnp.pad(arr, (0, length - len(arr)), constant_values=0)
+
     audio_batch = jnp.stack([pad(a, max_len) for a in audio_arrs])
     label_batch = jnp.stack([pad(l, max_len) for l in label_arrs])
     sample_rate_batch = jnp.array(sample_rates)
     valid_lengths = jnp.array([len(a) for a in audio_arrs])
+
+    # Move all batch arrays to the selected device
+    device = jax.devices(DEVICE)[0]
+    audio_batch = jax.device_put(audio_batch, device)
+    label_batch = jax.device_put(label_batch, device)
+    sample_rate_batch = jax.device_put(sample_rate_batch, device)
+    valid_lengths = jax.device_put(valid_lengths, device)
 
     def chunk_loss(params_array, audio, label, sample_rate, valid_len):
         fast_window, slow_window, w0, w1, w2 = params_array
@@ -322,6 +333,8 @@ def optimize_transient_detector(chunks: List[TransientExample]) -> TransientDete
 
     v_chunk_loss = jax.vmap(chunk_loss, in_axes=(None, 0, 0, 0, 0))
 
+
+    @jax.jit
     def loss_for_params(param_array):
         losses, counts = v_chunk_loss(param_array, audio_batch, label_batch, sample_rate_batch, valid_lengths)
         total_loss = jnp.sum(losses)
