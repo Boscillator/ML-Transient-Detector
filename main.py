@@ -3,7 +3,6 @@ import numpy as np
 import jax.numpy as jnp
 
 from data import (
-    TransientExample,
     load_transient_example,
     chunkify_examples,
 )
@@ -16,12 +15,7 @@ from evaluation import evaluate_model
 from plotting import plot_predictions
 from typing import Optional
 import matplotlib.pyplot as plt  # kept for any future in-main plotting
-from evaluation import EvaluationResult
-from typing import Dict, Union
-from plotting import plot_chunks
-from plotting import plot_chunk_with_prediction, plot_predictions
-from model import transient_detector, loss_function
-from evaluation import EvaluationResult, evaluate_model_for_threshold
+from plotting import plot_predictions
 
 import numpy as np  # re-import for usage below
 
