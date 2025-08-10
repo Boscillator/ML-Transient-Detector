@@ -14,17 +14,18 @@ from model import (
     TransientDetectorParameters,
     optimize_transient_detector,
 )
-from evaluation import evaluate_model
+from evaluation import EvaluationResult, evaluate_model, save_results
 from plotting import plot_predictions
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-def train_model(hyperparams: ExperimentHyperparameters, train_set, val_set):
+def train_model(hyperparams: ExperimentHyperparameters, train_set, val_set) -> List[EvaluationResult]:
     if not train_set:
         logger.error("No training data found. Exiting.")
-        return
+        raise ValueError("No training data provided")
+
     logger.info(
         f"Loaded {len(train_set)} training and {len(val_set)} validation examples from dataset."
     )
@@ -96,7 +97,8 @@ def main():
     logging.basicConfig(level=logging.INFO)
     hyperparams = ExperimentHyperparameters()
     train_set, val_set = load_dataset(Path("data/export"), hyperparams, split=0.5)
-    train_model(hyperparams, train_set, val_set)
+    results = train_model(hyperparams, train_set, val_set)
+    save_results('test', results)
 
 
 if __name__ == "__main__":

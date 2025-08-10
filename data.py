@@ -182,6 +182,8 @@ def load_whole_dataset(
                 logger.warning(f"Failed to load {base_path}: {e}")
         else:
             logger.info(f"No label file for {base_path}, skipping.")
+
+    logger.info(f"Loaded {len(examples)} examples from {path}")
     return examples
 
 
@@ -192,7 +194,7 @@ def load_dataset(
     Load the dataset from a directory, shuffle, and split into train and validation sets.
     Args:
         path: Path to the folder containing .wav and _Labels.txt files (e.g., Path('data/export'))
-        hyperparms: ExperimentHyperparameters instance
+        hyperparms: ExperimentHyperparameters instancesdf lkjoij
         split: Fraction of data to use for training (default 0.5)
     Returns:
         train_set: List[TransientExample]

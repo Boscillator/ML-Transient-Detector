@@ -1,9 +1,11 @@
+
 """
 Event detection, evaluation, and metrics for transient detection.
 """
 
 from __future__ import annotations
-
+import json
+from pathlib import Path
 from dataclasses import dataclass
 from typing import List
 
@@ -188,3 +190,63 @@ def evaluate_model(
         results.append(evaluate_model_for_threshold(hparams, params, data, float(th)))
     logger.info("Done evaluating model")
     return results
+
+
+def save_results(run_name: str, results: List[EvaluationResult]):
+    """
+    Save a list of EvaluationResult as JSON files in data/results/.
+    Each file is named {accuracy:.3f}_th{threshold:.2f}_{run_name}.json for easy sorting.
+    Args:
+        run_name: The name of the run (used as filename suffix).
+        results: List of EvaluationResult objects.
+    """
+    results_dir = Path("data/results")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    from dataclasses import asdict, is_dataclass
+    import jax.numpy as jnp
+    import numpy as np
+
+
+    def make_serializable(obj):
+        # Recursively convert to serializable types
+        if isinstance(obj, type):
+            # Don't serialize types/classes
+            return str(obj)
+        if is_dataclass(obj) and not isinstance(obj, type):
+            # Only call asdict on dataclass instances, not types
+            return {k: make_serializable(v) for k, v in asdict(obj).items()}
+        elif isinstance(obj, dict):
+            return {k: make_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [make_serializable(v) for v in obj]
+        elif isinstance(obj, (jnp.ndarray, np.ndarray)):
+            return obj.tolist()
+        elif hasattr(obj, 'item') and callable(getattr(obj, 'item', None)) and not isinstance(obj, type):
+            # Handles 0-d arrays, but not types
+            try:
+                return obj.item()
+            except Exception:
+                return str(obj)
+        elif isinstance(obj, (float, int, str, bool)) or obj is None:
+            return obj
+        else:
+            # Try to convert to float if possible (e.g., JAX scalars), but not on types
+            try:
+                if not isinstance(obj, type):
+                    return float(obj)
+                else:
+                    return str(obj)
+            except Exception:
+                return str(obj)
+
+    for res in results:
+        res_dict = make_serializable(res)
+        acc = float(res.accuracy)
+        th = float(res.threshold)
+        filename = f"{acc:.3f}_th{th:.2f}_{run_name}.json"
+        out_path = results_dir / filename
+        with open(out_path, "w") as f:
+            json.dump(res_dict, f, indent=2)
+        paths.append(str(out_path))
+    return paths
