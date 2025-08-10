@@ -96,15 +96,16 @@ class ExperimentHyperparameters:
     loss_epsilon: float = 1e-7
     num_channels: int = 3
     window_bounds: tuple = (1e-3, MAX_WINDOW_SIZE)
-    weight_bounds: tuple = (-500.0, 500.0)
-    f0_bounds: tuple = (20.0, 20000.0)  # Hz, sensible audio range
+    weight_bounds: tuple = (-50.0, 50.0)
+    f0_bounds: tuple = (200.0, 19000.0)  # Hz, sensible audio range
     q_bounds: tuple = (0.1, 2.0)       # Q, typical bandpass range
-    bias_bounds: tuple = (-500.0, 500.0)
-    post_gain_bounds: tuple = (-1e4, 1e4)
+    bias_bounds: tuple = (-10.0, 10.0)
+    post_gain_bounds: tuple = (-10.0, 10.0)
     post_bias_bounds: tuple = (-1.0, 1.0)
     detector_defaults: TransientDetectorParameters = field(
         default_factory=TransientDetectorParameters
     )
+    use_differential_evolution: bool = True  # If True, run DE before L-BFGS-B
 
 
 def softmax_kernel(window_size: float) -> jnp.ndarray:
@@ -349,13 +350,28 @@ def optimize_transient_detector(chunks, hyperparams: ExperimentHyperparameters):
             f"Current: {TransientDetectorParameters.from_array(xk, hyperparams)}"
         )
 
+    # Optionally run differential evolution first
+    if hyperparams.use_differential_evolution:
+        logger.info("Running differential evolution (global search)...")
+        de_result = scipy.optimize.differential_evolution(
+            func=loss_for_params,
+            bounds=bounds,
+            maxiter=100,
+            popsize=15,
+            disp=True,
+            polish=False,
+            callback=lambda x, cov: logger.info(f"DE iteration: {TransientDetectorParameters.from_array(x, hyperparams)}, {cov}")
+        )
+        logger.info(f"DE finished. Loss: {de_result.fun}, x0: {TransientDetectorParameters.from_array(de_result.x, hyperparams)}")
+        x0 = de_result.x
+
     result = scipy.optimize.minimize(
         loss_for_params,
         x0,
         method="L-BFGS-B",
         jac=loss_grad,
         bounds=bounds,
-        options={"disp": True},
+        options={"disp": True, "maxiter": 1000},
         callback=progress_callback,
     )
 
