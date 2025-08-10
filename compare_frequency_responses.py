@@ -17,7 +17,13 @@ freqs = jnp.fft.rfftfreq(N, 1.0 / sample_rate)
 # Prepare plot grid
 grid_rows = len(f0s)
 grid_cols = len(qs)
-fig, axes = plt.subplots(grid_rows, grid_cols, figsize=(4 * grid_cols, 3 * grid_rows), sharex=True, sharey=True)
+fig, axes = plt.subplots(
+    grid_rows,
+    grid_cols,
+    figsize=(4 * grid_cols, 3 * grid_rows),
+    sharex=True,
+    sharey=True,
+)
 
 
 for i, f0 in enumerate(f0s):
@@ -33,7 +39,12 @@ for i, f0 in enumerate(f0s):
         # Plot
         ax = axes[i, j] if grid_rows > 1 else axes[j]
         ax.plot(freqs, 20 * jnp.log10(jnp.abs(iir_fft) + 1e-10), label="IIR (biquad)")
-        ax.plot(freqs, 20 * jnp.log10(jnp.abs(fir_fft) + 1e-10), label="FIR (converted)", linestyle="--")
+        ax.plot(
+            freqs,
+            20 * jnp.log10(jnp.abs(fir_fft) + 1e-10),
+            label="FIR (converted)",
+            linestyle="--",
+        )
         ax.set_title(f"f0={f0:.0f} Hz, Q={q:.1f}")
         ax.set_xlim(0, sample_rate / 2)
         ax.set_ylim(-40, 10)

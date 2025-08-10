@@ -155,7 +155,9 @@ def chunkify_examples(
     return chunks
 
 
-def load_whole_dataset(path: Path, hyperparams: "ExperimentHyperparameters") -> List[TransientExample]:
+def load_whole_dataset(
+    path: Path, hyperparams: "ExperimentHyperparameters"
+) -> List[TransientExample]:
     """
     Scan a directory for .wav and _Labels.txt pairs, load each as a TransientExample using load_transient_example, and return a list of examples.
     Args:
@@ -182,7 +184,10 @@ def load_whole_dataset(path: Path, hyperparams: "ExperimentHyperparameters") -> 
             logger.info(f"No label file for {base_path}, skipping.")
     return examples
 
-def load_dataset(path: Path, hyperparms: ExperimentHyperparameters, split: float = 0.5) -> Tuple[List[TransientExample], List[TransientExample]]:
+
+def load_dataset(
+    path: Path, hyperparms: "ExperimentHyperparameters", split: float = 0.5
+) -> Tuple[List[TransientExample], List[TransientExample]]:
     """
     Load the dataset from a directory, shuffle, and split into train and validation sets.
     Args:

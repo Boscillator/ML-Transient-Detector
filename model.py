@@ -98,14 +98,14 @@ class ExperimentHyperparameters:
     window_bounds: tuple = (1e-3, MAX_WINDOW_SIZE)
     weight_bounds: tuple = (-50.0, 50.0)
     f0_bounds: tuple = (200.0, 19000.0)  # Hz, sensible audio range
-    q_bounds: tuple = (0.1, 2.0)       # Q, typical bandpass range
+    q_bounds: tuple = (0.1, 2.0)  # Q, typical bandpass range
     bias_bounds: tuple = (-10.0, 10.0)
     post_gain_bounds: tuple = (-10.0, 10.0)
     post_bias_bounds: tuple = (-1.0, 1.0)
     detector_defaults: TransientDetectorParameters = field(
         default_factory=TransientDetectorParameters
     )
-    use_differential_evolution: bool = False # If True, run DE before L-BFGS-B
+    use_differential_evolution: bool = False  # If True, run DE before L-BFGS-B
 
 
 def softmax_kernel(window_size: float) -> jnp.ndarray:
@@ -209,17 +209,21 @@ def compute_all_channels(
 ) -> jnp.ndarray:
     """Compute all channel outputs as a JAX array."""
     n = window_sizes.shape[0]
-    assert n == weights.shape[0] == f0s.shape[0] == qs.shape[0], "All per-channel parameter arrays must have same length"
+    assert n == weights.shape[0] == f0s.shape[0] == qs.shape[0], (
+        "All per-channel parameter arrays must have same length"
+    )
+
     def channel_fn(i):
         return compute_channel_output(
             audio,
-            window_sizes[i], # type: ignore
-            weights[i], # type: ignore
-            f0s[i], # type: ignore
-            qs[i], # type: ignore
+            window_sizes[i],  # type: ignore
+            weights[i],  # type: ignore
+            f0s[i],  # type: ignore
+            qs[i],  # type: ignore
             sample_rate,
             is_training,
-        ) # type: ignore
+        )  # type: ignore
+
     return jnp.stack([channel_fn(i) for i in range(n)], axis=0)
 
 
@@ -232,7 +236,13 @@ def transient_detector(
     hyperparams: Optional[ExperimentHyperparameters] = None,
 ) -> jnp.ndarray:
     channel_outputs = compute_all_channels(
-        audio, params.window_sizes, params.weights, params.f0s, params.qs, sample_rate, is_training
+        audio,
+        params.window_sizes,
+        params.weights,
+        params.f0s,
+        params.qs,
+        sample_rate,
+        is_training,
     )
     summed = jnp.sum(channel_outputs, axis=0)
     inner = params.bias + summed
@@ -360,9 +370,13 @@ def optimize_transient_detector(chunks, hyperparams: ExperimentHyperparameters):
             popsize=15,
             disp=True,
             polish=False,
-            callback=lambda x, cov: logger.info(f"DE iteration: {TransientDetectorParameters.from_array(x, hyperparams)}, {cov}")
+            callback=lambda x, cov: logger.info(
+                f"DE iteration: {TransientDetectorParameters.from_array(x, hyperparams)}, {cov}"
+            ),
         )
-        logger.info(f"DE finished. Loss: {de_result.fun}, x0: {TransientDetectorParameters.from_array(de_result.x, hyperparams)}")
+        logger.info(
+            f"DE finished. Loss: {de_result.fun}, x0: {TransientDetectorParameters.from_array(de_result.x, hyperparams)}"
+        )
         x0 = de_result.x
 
     result = scipy.optimize.minimize(
@@ -388,5 +402,3 @@ Optimization finished.
 """)
 
     return TransientDetectorParameters.from_array(result.x, hyperparams)
-
-

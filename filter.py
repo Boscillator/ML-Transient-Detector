@@ -28,6 +28,7 @@ def design_biquad_bandpass(f0_hz, q, fs) -> tuple[jnp.ndarray, jnp.ndarray]:
     a = jnp.array([1.0, a1 / a0, a2 / a0], dtype=jnp.float32)
     return b, a
 
+
 def convert_to_fir_filter(b: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
     """
     Convert biquad (IIR) coefficients to a causal FIR filter by matching the frequency response.
@@ -54,6 +55,7 @@ def convert_to_fir_filter(b: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
     fir = h[:num_taps]
     return fir.astype(jnp.float32)
 
+
 def biquad_apply(x: jnp.ndarray, b: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
     """Causal IIR biquad evaluation via lax.scan; differentiable in x,b,a."""
     b0, b1, b2 = b
@@ -68,6 +70,7 @@ def biquad_apply(x: jnp.ndarray, b: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
     _, y = lax.scan(step, init, x)
     return y
 
+
 def apply_fir_filter(x: jnp.ndarray, b: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
     """
     Apply a causal FIR filter (converted from biquad) to x using convolution.
@@ -78,7 +81,8 @@ def apply_fir_filter(x: jnp.ndarray, b: jnp.ndarray, a: jnp.ndarray) -> jnp.ndar
     x_ = x[None, :, None]  # [N, L, C] = [1, length, 1]
     fir_ = fir[:, None, None]  # [W, I, O] = [kernel, 1, 1]
     y = lax.conv_general_dilated(
-        x_, fir_,
+        x_,
+        fir_,
         window_strides=(1,),
         padding=[(fir.shape[0] - 1, 0)],  # causal: pad left only
         dimension_numbers=("NWC", "WIO", "NWC"),
