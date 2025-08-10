@@ -38,8 +38,9 @@ class TransientDetectorParameters:
     post_gain: float = 1.0
     post_bias: float = 0.0
 
-    def to_array(self) -> jnp.ndarray:
-        """Convert parameters to a JAX array in canonical order."""
+
+    def to_array(self, hyperparams: 'ExperimentHyperparameters') -> jnp.ndarray:
+        """Convert parameters to a JAX array in canonical order. hyperparams is reserved for future use."""
         return jnp.array([
             self.fast_window,
             self.slow_window,
@@ -51,17 +52,20 @@ class TransientDetectorParameters:
         ], dtype=jnp.float32)
 
     @classmethod
-    def from_array(cls, arr: jnp.ndarray) -> Self:
-        """Create a TransientDetectorParameters from a JAX or numpy array."""
+    def from_array(cls, arr: jnp.ndarray, hyperparams: 'ExperimentHyperparameters') -> Self:
+        """Create a TransientDetectorParameters from a JAX or numpy array. hyperparams is reserved for future use."""
         arr = jnp.asarray(arr)
+
+        # We know that this array contains floats, but the type checker doesn't.
+        # However, we can't use `float()` here because the array might be a JAX tracer.
         return cls(
-            fast_window=float(arr[0]),
-            slow_window=float(arr[1]),
-            w0=float(arr[2]),
-            w1=float(arr[3]),
-            w2=float(arr[4]),
-            post_gain=float(arr[5]),
-            post_bias=float(arr[6]),
+            fast_window=arr[0], # type: ignore
+            slow_window=arr[1], # type: ignore
+            w0=arr[2], #type: ignore
+            w1=arr[3], #type: ignore
+            w2=arr[4], #type: ignore
+            post_gain=arr[5], #type: ignore
+            post_bias=arr[6], #type: ignore
         )
 
 
@@ -237,7 +241,7 @@ def optimize_transient_detector(
     valid_lengths = jax.device_put(valid_lengths, device)
 
     def chunk_loss(params_array, audio, label, sample_rate, valid_len):
-        params = TransientDetectorParameters.from_array(params_array)
+        params = TransientDetectorParameters.from_array(params_array, hyperparams)
         pred = transient_detector(
             params, audio, sample_rate, is_training=True, hyperparams=hyperparams
         )
@@ -264,12 +268,12 @@ def optimize_transient_detector(
     loss_grad = jax.grad(lambda p: loss_for_params(p))
 
     default_params = TransientDetectorParameters()
-    x0 = np.array(default_params.to_array(), dtype=np.float32)
+    x0 = np.array(default_params.to_array(hyperparams), dtype=np.float32)
     bounds = list(hyperparams.bounds)
 
     # Progress display callback
     def progress_callback(xk):
-        logger.info(f"Current: {TransientDetectorParameters.from_array(xk)}")
+        logger.info(f"Current: {TransientDetectorParameters.from_array(xk, hyperparams)}")
 
     result = scipy.optimize.minimize(
         loss_for_params,
@@ -294,4 +298,4 @@ Optimization finished.
   Optimized parameters: {result.x}
 """)
 
-    return TransientDetectorParameters.from_array(result.x)
+    return TransientDetectorParameters.from_array(result.x, hyperparams)
