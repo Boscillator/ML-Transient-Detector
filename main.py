@@ -20,8 +20,7 @@ from plotting import plot_predictions
 import numpy as np  # re-import for usage below
 
 
-def main() -> None:
-    hyperparams = ExperimentHyperparameters()
+def train_model(hyperparams: ExperimentHyperparameters):
     # Load and plot an example
     base_path = "data/export/DarkIllusion_ElecGtr5DI"
     example = load_transient_example(base_path, hyperparams)
@@ -78,6 +77,12 @@ def main() -> None:
         prefix="",
         print_prefix="Optimized: ",
     )
+    return eval_results
+
+
+def main():
+    hyperparams = ExperimentHyperparameters()
+    train_model(hyperparams)
 
 
 if __name__ == "__main__":
