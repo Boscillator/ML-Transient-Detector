@@ -180,9 +180,11 @@ def evaluate_model(
     params: TransientDetectorParameters,
     data: List[TransientExample],
 ) -> List[EvaluationResult]:
+    logger.info("Evaluating model")
     # Evaluate across a sweep of thresholds
     thresholds = np.linspace(0.1, 0.9, 9, dtype=np.float32)
     results: List[EvaluationResult] = []
     for th in thresholds:
         results.append(evaluate_model_for_threshold(hparams, params, data, float(th)))
+    logger.info("Done evaluating model")
     return results

@@ -15,7 +15,7 @@ import numpy as np
 import scipy.optimize
 
 from data import TransientExample
-from filter import design_biquad_bandpass, biquad_apply
+from filter import design_biquad_bandpass, biquad_apply, apply_fir_filter
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class TransientDetectorParameters:
         default_factory=lambda: jnp.array([1000.0, 2000.0, 4000.0], dtype=jnp.float32)
     )  # Hz, per channel
     qs: jnp.ndarray = field(
-        default_factory=lambda: jnp.array([2.0, 2.0, 2.0], dtype=jnp.float32)
+        default_factory=lambda: jnp.array([1.0, 1.0, 1.0], dtype=jnp.float32)
     )  # Q, per channel
     bias: float = 0.0
     post_gain: float = 1.0
@@ -98,7 +98,7 @@ class ExperimentHyperparameters:
     window_bounds: tuple = (1e-3, MAX_WINDOW_SIZE)
     weight_bounds: tuple = (-500.0, 500.0)
     f0_bounds: tuple = (20.0, 20000.0)  # Hz, sensible audio range
-    q_bounds: tuple = (0.1, 20.0)       # Q, typical bandpass range
+    q_bounds: tuple = (0.1, 2.0)       # Q, typical bandpass range
     bias_bounds: tuple = (-500.0, 500.0)
     post_gain_bounds: tuple = (-1e4, 1e4)
     post_bias_bounds: tuple = (-1.0, 1.0)
@@ -186,7 +186,11 @@ def compute_channel_output(
 ) -> jnp.ndarray:
     """Compute a single channel's weighted moving average of the power envelope, with bandpass filter."""
     b, a = design_biquad_bandpass(f0, q, sample_rate)
-    filtered = biquad_apply(audio, b, a)
+    # Use FIR for training, IIR for eval
+    if is_training:
+        filtered = apply_fir_filter(audio, b, a)
+    else:
+        filtered = biquad_apply(audio, b, a)
     power = jnp.abs(filtered)
     window_samples = window_size * sample_rate
     env = moving_average(power, window_samples, is_training=is_training)
