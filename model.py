@@ -105,7 +105,7 @@ class ExperimentHyperparameters:
     detector_defaults: TransientDetectorParameters = field(
         default_factory=TransientDetectorParameters
     )
-    use_differential_evolution: bool = True  # If True, run DE before L-BFGS-B
+    use_differential_evolution: bool = False # If True, run DE before L-BFGS-B
 
 
 def softmax_kernel(window_size: float) -> jnp.ndarray:

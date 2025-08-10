@@ -1,11 +1,12 @@
 from typing import List
 import logging
+from pathlib import Path
 import numpy as np
 import jax
 import jax.numpy as jnp
 
 from data import (
-    load_transient_example,
+    load_dataset,
     chunkify_examples,
 )
 from model import (
@@ -20,15 +21,26 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 def train_model(hyperparams: ExperimentHyperparameters):
-    # Load and plot an example
-    base_path = "data/export/DarkIllusion_ElecGtr5DI"
-    example = load_transient_example(base_path, hyperparams)
-    chunks = chunkify_examples(example, hyperparams)
-    logger.info(f"Loaded {len(chunks)} chunks from example {base_path}")
 
-    params = TransientDetectorParameters()
+    # Load and split the dataset
+    train_set, val_set = load_dataset(Path("data/export"), hyperparams, split=0.5)
+    if not train_set:
+        logger.error("No training data found. Exiting.")
+        return
+    logger.info(f"Loaded {len(train_set)} training and {len(val_set)} validation examples from dataset.")
+
+    # Optionally chunkify all training and validation examples (if needed)
+    train_chunks = []
+    for ex in train_set:
+        train_chunks.extend(chunkify_examples(ex, hyperparams))
+    val_chunks = []
+    for ex in val_set:
+        val_chunks.extend(chunkify_examples(ex, hyperparams))
+    logger.info(f"Total chunks: {len(train_chunks)} train, {len(val_chunks)} val")
+
 
     # Plot predictions before optimization (eval kernel)
+    # params = TransientDetectorParameters()
     # plot_predictions(
     #     chunks,
     #     params,
@@ -41,9 +53,8 @@ def train_model(hyperparams: ExperimentHyperparameters):
     # )
 
     # Optimize parameters
-
-    logger.info("Optimizing transient detector parameters...")
-    opt_params = optimize_transient_detector(chunks, hyperparams)
+    logger.info("Optimizing transient detector parameters on training set...")
+    opt_params = optimize_transient_detector(train_chunks, hyperparams)
     logger.info(f"Optimized parameters: {opt_params}")
 
     # Switch to CPU for evaluation (we run the IIR filters in evaluation, which are very slow on the GPU)
@@ -55,11 +66,12 @@ def train_model(hyperparams: ExperimentHyperparameters):
         opt_params,
     )
 
+
     with jax.default_device(cpu):
-        # Evaluate optimized model across thresholds
-        eval_results = evaluate_model(hyperparams, opt_params_cpu, chunks)
+        # Evaluate optimized model on validation set across thresholds
+        eval_results = evaluate_model(hyperparams, opt_params_cpu, val_chunks)
         # Print concise summary
-        logger.info("Evaluation results by threshold:")
+        logger.info("Validation results by threshold:")
         for r in eval_results:
             logger.info(
                 f"  th={r.threshold:.2f} | loss={r.loss:.4f} | TP={r.true_positives} FP={r.false_positives} FN={r.false_negatives} | acc={r.accuracy:.3f} rec={r.recall:.3f}"
@@ -78,7 +90,7 @@ def train_model(hyperparams: ExperimentHyperparameters):
 
         # Plot predictions after optimization (force CPU for IIR eval)
         plot_predictions(
-            chunks,
+            val_chunks,
             opt_params_cpu,
             output_dir="data/plots/chunk_preds_optimized",
             is_training=False,

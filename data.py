@@ -3,7 +3,8 @@ Data loading, chunking, and label generation for transient detection.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 import logging
 import os
@@ -152,3 +153,60 @@ def chunkify_examples(
         if start_sample < 0:
             start_sample = 0
     return chunks
+
+
+def load_whole_dataset(path: Path, hyperparams: "ExperimentHyperparameters") -> List[TransientExample]:
+    """
+    Scan a directory for .wav and _Labels.txt pairs, load each as a TransientExample using load_transient_example, and return a list of examples.
+    Args:
+        path: Path to the folder containing .wav and _Labels.txt files (e.g., Path('data/export'))
+        hyperparams: ExperimentHyperparameters instance
+    Returns:
+        List[TransientExample]
+    """
+    examples = []
+    path = Path(path)
+    wav_files = sorted(path.glob("*.wav"))
+    for wav_file in wav_files:
+        base = wav_file.with_suffix("")
+        # Remove trailing extension, e.g. 'DarkIllusion_ElecGtr5DI'
+        base_path = str(base)
+        label_path = base_path + "_Labels.txt"
+        if Path(label_path).exists():
+            try:
+                example = load_transient_example(base_path, hyperparams)
+                examples.append(example)
+            except Exception as e:
+                logger.warning(f"Failed to load {base_path}: {e}")
+        else:
+            logger.info(f"No label file for {base_path}, skipping.")
+    return examples
+
+def load_dataset(path: Path, hyperparms: ExperimentHyperparameters, split: float = 0.5) -> Tuple[List[TransientExample], List[TransientExample]]:
+    """
+    Load the dataset from a directory, shuffle, and split into train and validation sets.
+    Args:
+        path: Path to the folder containing .wav and _Labels.txt files (e.g., Path('data/export'))
+        hyperparms: ExperimentHyperparameters instance
+        split: Fraction of data to use for training (default 0.5)
+    Returns:
+        train_set: List[TransientExample]
+        val_set: List[TransientExample]
+    """
+    examples = load_whole_dataset(path, hyperparms)
+    if not examples:
+        logger.warning(f"No examples found in {path}")
+        return [], []
+    rng = random.Random(42)
+    indices = list(range(len(examples)))
+    rng.shuffle(indices)
+    split_idx = int(len(examples) * split)
+    if len(examples) == 1:
+        logger.error("Only one example")
+        raise ValueError("Not enough examples to split into train and validation sets.")
+    else:
+        train_indices = indices[:split_idx]
+        val_indices = indices[split_idx:]
+        train_set = [examples[i] for i in train_indices]
+        val_set = [examples[i] for i in val_indices]
+    return train_set, val_set
