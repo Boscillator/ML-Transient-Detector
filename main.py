@@ -26,6 +26,7 @@ def train_model(hyperparams: ExperimentHyperparameters):
     base_path = "data/export/DarkIllusion_ElecGtr5DI"
     example = load_transient_example(base_path, hyperparams)
     chunks = chunkify_examples(example, hyperparams)
+    logger.info(f"Loaded {len(chunks)} chunks from example {base_path}")
     chunks = chunks[:5]  # Limit to first 5 chunks for testing
 
     params = TransientDetectorParameters()

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Self
 
 import jax
 import jax.numpy as jnp
@@ -37,6 +37,32 @@ class TransientDetectorParameters:
     w2: float = -20.0  # slow_env weight
     post_gain: float = 1.0
     post_bias: float = 0.0
+
+    def to_array(self) -> jnp.ndarray:
+        """Convert parameters to a JAX array in canonical order."""
+        return jnp.array([
+            self.fast_window,
+            self.slow_window,
+            self.w0,
+            self.w1,
+            self.w2,
+            self.post_gain,
+            self.post_bias,
+        ], dtype=jnp.float32)
+
+    @classmethod
+    def from_array(cls, arr: jnp.ndarray) -> Self:
+        """Create a TransientDetectorParameters from a JAX or numpy array."""
+        arr = jnp.asarray(arr)
+        return cls(
+            fast_window=float(arr[0]),
+            slow_window=float(arr[1]),
+            w0=float(arr[2]),
+            w1=float(arr[3]),
+            w2=float(arr[4]),
+            post_gain=float(arr[5]),
+            post_bias=float(arr[6]),
+        )
 
 
 @jax.tree_util.register_dataclass
@@ -211,16 +237,7 @@ def optimize_transient_detector(
     valid_lengths = jax.device_put(valid_lengths, device)
 
     def chunk_loss(params_array, audio, label, sample_rate, valid_len):
-        fast_window, slow_window, w0, w1, w2, post_gain, post_bias = params_array
-        params = TransientDetectorParameters(
-            fast_window=fast_window,
-            slow_window=slow_window,
-            w0=w0,
-            w1=w1,
-            w2=w2,
-            post_gain=post_gain,
-            post_bias=post_bias,
-        )
+        params = TransientDetectorParameters.from_array(params_array)
         pred = transient_detector(
             params, audio, sample_rate, is_training=True, hyperparams=hyperparams
         )
@@ -247,23 +264,12 @@ def optimize_transient_detector(
     loss_grad = jax.grad(lambda p: loss_for_params(p))
 
     default_params = TransientDetectorParameters()
-    x0 = np.array(
-        [
-            default_params.fast_window,
-            default_params.slow_window,
-            default_params.w0,
-            default_params.w1,
-            default_params.w2,
-            default_params.post_gain,
-            default_params.post_bias,
-        ],
-        dtype=np.float32,
-    )
+    x0 = np.array(default_params.to_array(), dtype=np.float32)
     bounds = list(hyperparams.bounds)
 
     # Progress display callback
     def progress_callback(xk):
-        logger.info(f"Current: {TransientDetectorParameters(*xk)}")
+        logger.info(f"Current: {TransientDetectorParameters.from_array(xk)}")
 
     result = scipy.optimize.minimize(
         loss_for_params,
@@ -288,4 +294,4 @@ Optimization finished.
   Optimized parameters: {result.x}
 """)
 
-    return TransientDetectorParameters(*result.x)
+    return TransientDetectorParameters.from_array(result.x)
