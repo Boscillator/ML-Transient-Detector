@@ -28,6 +28,31 @@ def design_biquad_bandpass(f0_hz, q, fs) -> tuple[jnp.ndarray, jnp.ndarray]:
     a = jnp.array([1.0, a1 / a0, a2 / a0], dtype=jnp.float32)
     return b, a
 
+def convert_to_fir_filter(b: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
+    """
+    Convert biquad (IIR) coefficients to a causal FIR filter by matching the frequency response.
+    Uses frequency sampling: computes the frequency response of the biquad, then uses IFFT to get FIR taps.
+    The result is a real, causal, differentiable FIR filter.
+    """
+    # Number of FIR taps (should be odd for symmetry, and long enough for accuracy)
+    num_taps = 129
+    # Frequency grid (linear, up to Nyquist)
+    w = jnp.linspace(0, jnp.pi, num_taps)
+    # Evaluate biquad frequency response H(e^{jw})
+    ejw = jnp.exp(1j * w)
+    ejw2 = jnp.exp(2j * w)
+    num = b[0] + b[1] * ejw**-1 + b[2] * ejw**-2
+    den = a[0] + a[1] * ejw**-1 + a[2] * ejw**-2
+    H = num / den
+    # IFFT to get impulse response (FIR taps)
+    # Mirror to get full spectrum for real IFFT
+    H_full = jnp.concatenate([H, jnp.conj(H[-2:0:-1])])
+    h = jnp.fft.ifft(H_full).real
+    # Center the impulse response (causal: shift right)
+    h = jnp.roll(h, num_taps // 2)
+    # Truncate to num_taps (causal, all zeros before index 0)
+    fir = h[:num_taps]
+    return fir.astype(jnp.float32)
 
 def biquad_apply(x: jnp.ndarray, b: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
     """Causal IIR biquad evaluation via lax.scan; differentiable in x,b,a."""
@@ -41,4 +66,21 @@ def biquad_apply(x: jnp.ndarray, b: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
 
     init = (0.0, 0.0, 0.0, 0.0)
     _, y = lax.scan(step, init, x)
+    return y
+
+def apply_fir_filter(x: jnp.ndarray, b: jnp.ndarray, a: jnp.ndarray) -> jnp.ndarray:
+    """
+    Apply a causal FIR filter (converted from biquad) to x using convolution.
+    This is differentiable and causal.
+    """
+    fir = convert_to_fir_filter(b, a)
+    # Reshape for JAX conv: [batch, length, channels]
+    x_ = x[None, :, None]  # [N, L, C] = [1, length, 1]
+    fir_ = fir[:, None, None]  # [W, I, O] = [kernel, 1, 1]
+    y = lax.conv_general_dilated(
+        x_, fir_,
+        window_strides=(1,),
+        padding=[(fir.shape[0] - 1, 0)],  # causal: pad left only
+        dimension_numbers=("NWC", "WIO", "NWC"),
+    )[0, :, 0]
     return y
