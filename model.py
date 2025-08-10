@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 # Maximum window size for moving average (in seconds)
-MAX_WINDOW_SIZE = 0.5  # seconds, must match optimizer bounds
+MAX_WINDOW_SIZE = 0.25  # seconds, must match optimizer bounds
 # Assumed sample rate for kernel size (must be global for MAX_KERNEL_SIZE)
 ASSUME_SAMPLE_RATE = 48000
 # Kernel size for moving average (must be odd)
@@ -30,8 +30,8 @@ MAX_KERNEL_SIZE = MAX_KERNEL_SIZE + (MAX_KERNEL_SIZE + 1) % 2
 
 @dataclass
 class TransientDetectorParameters:
-    window_sizes: jnp.ndarray = field(default_factory=lambda: jnp.array([0.01, 0.1], dtype=jnp.float32))  # in seconds, per channel
-    weights: jnp.ndarray = field(default_factory=lambda: jnp.array([20.0, -20.0], dtype=jnp.float32))     # per channel
+    window_sizes: jnp.ndarray = field(default_factory=lambda: jnp.array([0.01, 0.1, 0.001], dtype=jnp.float32))  # in seconds, per channel
+    weights: jnp.ndarray = field(default_factory=lambda: jnp.array([20.0, -20.0, -10.0], dtype=jnp.float32))     # per channel
     bias: float = 0.0
     post_gain: float = 1.0
     post_bias: float = 0.0
@@ -63,6 +63,7 @@ class TransientDetectorParameters:
 
 
 
+
 @jax.tree_util.register_dataclass
 @dataclass
 class ExperimentHyperparameters:
@@ -72,17 +73,12 @@ class ExperimentHyperparameters:
     overlap_s: float = 1.0
     window_s: float = 0.04  # for label generation
     loss_epsilon: float = 1e-7
-    num_channels: int = 2
-    window_defaults: list = field(default_factory=lambda: [0.01, 0.1])
-    weight_defaults: list = field(default_factory=lambda: [20.0, -20.0])
-    # Bounds for optimization (all windows, all weights, bias, post_gain, post_bias)
-    bounds: list = field(default_factory=lambda: [
-        (1e-3, 0.5), (1e-3, 0.5),   # window sizes
-        (-500.0, 500.0), (-500.0, 500.0),  # weights
-        (-500.0, 500.0),            # bias
-        (-1e4, 1e4),                # post_gain
-        (-1.0, 1.0),                # post_bias
-    ])
+    num_channels: int = 3
+    window_bounds: tuple = (1e-3, MAX_WINDOW_SIZE)
+    weight_bounds: tuple = (-500.0, 500.0)
+    bias_bounds: tuple = (-500.0, 500.0)
+    post_gain_bounds: tuple = (-1e4, 1e4)
+    post_bias_bounds: tuple = (-1.0, 1.0)
     detector_defaults: TransientDetectorParameters = field(
         default_factory=TransientDetectorParameters
     )
@@ -272,9 +268,19 @@ def optimize_transient_detector(
     # JAX grad for the loss function
     loss_grad = jax.grad(lambda p: loss_for_params(p))
 
+
     default_params = TransientDetectorParameters()
     x0 = np.array(default_params.to_array(hyperparams), dtype=np.float32)
-    bounds = list(hyperparams.bounds)
+
+    # Build bounds for all parameters
+    n = hyperparams.num_channels
+    bounds = (
+        [hyperparams.window_bounds] * n +
+        [hyperparams.weight_bounds] * n +
+        [hyperparams.bias_bounds] +
+        [hyperparams.post_gain_bounds] +
+        [hyperparams.post_bias_bounds]
+    )
 
     # Progress display callback
     def progress_callback(xk):
