@@ -15,6 +15,7 @@ import numpy as np
 import scipy.optimize
 
 from data import TransientExample
+from filter import design_biquad_bandpass, biquad_apply
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,12 @@ class TransientDetectorParameters:
     weights: jnp.ndarray = field(
         default_factory=lambda: jnp.array([20.0, -20.0, -10.0], dtype=jnp.float32)
     )  # per channel
+    f0s: jnp.ndarray = field(
+        default_factory=lambda: jnp.array([1000.0, 2000.0, 4000.0], dtype=jnp.float32)
+    )  # Hz, per channel
+    qs: jnp.ndarray = field(
+        default_factory=lambda: jnp.array([2.0, 2.0, 2.0], dtype=jnp.float32)
+    )  # Q, per channel
     bias: float = 0.0
     post_gain: float = 1.0
     post_bias: float = 0.0
@@ -45,6 +52,8 @@ class TransientDetectorParameters:
             [
                 jnp.asarray(self.window_sizes, dtype=jnp.float32),
                 jnp.asarray(self.weights, dtype=jnp.float32),
+                jnp.asarray(self.f0s, dtype=jnp.float32),
+                jnp.asarray(self.qs, dtype=jnp.float32),
                 jnp.array(
                     [self.bias, self.post_gain, self.post_bias], dtype=jnp.float32
                 ),
@@ -60,12 +69,16 @@ class TransientDetectorParameters:
         n = hyperparams.num_channels
         window_sizes = arr[:n]
         weights = arr[n : 2 * n]
-        bias = arr[2 * n]  # type: ignore
-        post_gain = arr[2 * n + 1]  # type: ignore
-        post_bias = arr[2 * n + 2]  # type: ignore
+        f0s = arr[2 * n : 3 * n]
+        qs = arr[3 * n : 4 * n]
+        bias = arr[4 * n]  # type: ignore
+        post_gain = arr[4 * n + 1]  # type: ignore
+        post_bias = arr[4 * n + 2]  # type: ignore
         return cls(
             window_sizes=window_sizes,
             weights=weights,
+            f0s=f0s,
+            qs=qs,
             bias=bias,  # type: ignore
             post_gain=post_gain,  # type: ignore
             post_bias=post_bias,  # type: ignore
@@ -84,6 +97,8 @@ class ExperimentHyperparameters:
     num_channels: int = 3
     window_bounds: tuple = (1e-3, MAX_WINDOW_SIZE)
     weight_bounds: tuple = (-500.0, 500.0)
+    f0_bounds: tuple = (20.0, 20000.0)  # Hz, sensible audio range
+    q_bounds: tuple = (0.1, 20.0)       # Q, typical bandpass range
     bias_bounds: tuple = (-500.0, 500.0)
     post_gain_bounds: tuple = (-1e4, 1e4)
     post_bias_bounds: tuple = (-1.0, 1.0)
@@ -164,11 +179,15 @@ def compute_channel_output(
     audio: jnp.ndarray,
     window_size: float,
     weight: float,
+    f0: float,
+    q: float,
     sample_rate: float,
     is_training: bool,
 ) -> jnp.ndarray:
-    """Compute a single channel's weighted moving average of the power envelope."""
-    power = jnp.abs(audio)
+    """Compute a single channel's weighted moving average of the power envelope, with bandpass filter."""
+    b, a = design_biquad_bandpass(f0, q, sample_rate)
+    filtered = biquad_apply(audio, b, a)
+    power = jnp.abs(filtered)
     window_samples = window_size * sample_rate
     env = moving_average(power, window_samples, is_training=is_training)
     return weight * env
@@ -178,18 +197,24 @@ def compute_all_channels(
     audio: jnp.ndarray,
     window_sizes: jnp.ndarray,
     weights: jnp.ndarray,
+    f0s: jnp.ndarray,
+    qs: jnp.ndarray,
     sample_rate: float,
     is_training: bool,
 ) -> jnp.ndarray:
     """Compute all channel outputs as a JAX array."""
     n = window_sizes.shape[0]
-    assert n == weights.shape[0], "window_sizes and weights must have same length"
-
+    assert n == weights.shape[0] == f0s.shape[0] == qs.shape[0], "All per-channel parameter arrays must have same length"
     def channel_fn(i):
         return compute_channel_output(
-            audio, window_sizes[i], weights[i], sample_rate, is_training
-        )  # type: ignore
-
+            audio,
+            window_sizes[i], # type: ignore
+            weights[i], # type: ignore
+            f0s[i], # type: ignore
+            qs[i], # type: ignore
+            sample_rate,
+            is_training,
+        ) # type: ignore
     return jnp.stack([channel_fn(i) for i in range(n)], axis=0)
 
 
@@ -202,7 +227,7 @@ def transient_detector(
     hyperparams: Optional[ExperimentHyperparameters] = None,
 ) -> jnp.ndarray:
     channel_outputs = compute_all_channels(
-        audio, params.window_sizes, params.weights, sample_rate, is_training
+        audio, params.window_sizes, params.weights, params.f0s, params.qs, sample_rate, is_training
     )
     summed = jnp.sum(channel_outputs, axis=0)
     inner = params.bias + summed
@@ -245,10 +270,10 @@ def loss_function(
     return jnp.mean(loss)
 
 
-def optimize_transient_detector(
-    chunks: List[TransientExample],
-    hyperparams: ExperimentHyperparameters,
-) -> TransientDetectorParameters:
+def optimize_transient_detector(chunks, hyperparams: ExperimentHyperparameters):
+    """
+    Optimize the transient detector parameters using a set of labeled audio chunks.
+    """
     # Prepare arrays for vmap
     audio_arrs = [jnp.asarray(chunk.audio) for chunk in chunks]
     label_arrs = [jnp.asarray(chunk.label_array) for chunk in chunks]
@@ -307,6 +332,8 @@ def optimize_transient_detector(
     bounds = (
         [hyperparams.window_bounds] * n
         + [hyperparams.weight_bounds] * n
+        + [hyperparams.f0_bounds] * n
+        + [hyperparams.q_bounds] * n
         + [hyperparams.bias_bounds]
         + [hyperparams.post_gain_bounds]
         + [hyperparams.post_bias_bounds]
@@ -341,3 +368,5 @@ Optimization finished.
 """)
 
     return TransientDetectorParameters.from_array(result.x, hyperparams)
+
+
