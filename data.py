@@ -4,14 +4,19 @@ Data loading, chunking, and label generation for transient detection.
 
 from dataclasses import dataclass
 from typing import List, Optional
+
+import logging
 import os
 import random
 import numpy as np
 from scipy.io import wavfile
 from typing import TYPE_CHECKING
 
+
 if TYPE_CHECKING:
     from model import ExperimentHyperparameters  # for type hints only
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass

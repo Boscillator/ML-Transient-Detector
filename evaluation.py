@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
+
+import logging
 import numpy as np
 import jax.numpy as jnp
 
@@ -17,6 +19,8 @@ from model import (
     transient_detector,
     loss_function,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass

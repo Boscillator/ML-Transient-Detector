@@ -4,6 +4,8 @@ Model definition, kernels, and optimization for transient detection.
 
 from __future__ import annotations
 
+
+import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -13,6 +15,8 @@ import numpy as np
 import scipy.optimize
 
 from data import TransientExample
+
+logger = logging.getLogger(__name__)
 
 
 # Maximum window size for moving average (in seconds)
@@ -259,7 +263,7 @@ def optimize_transient_detector(
 
     # Progress display callback
     def progress_callback(xk):
-        print(f"Current: {TransientDetectorParameters(*xk)}")
+        logger.info(f"Current: {TransientDetectorParameters(*xk)}")
 
     result = scipy.optimize.minimize(
         loss_for_params,
@@ -270,5 +274,18 @@ def optimize_transient_detector(
         options={"disp": True},
         callback=progress_callback,
     )
+
+
+    # Log optimization result details
+    logger.info(f"""
+Optimization finished.
+  Success: {result.success}
+  Status: {result.status}
+  Message: {result.message}
+  Function evaluations: {result.nfev}
+  Gradient evaluations: {getattr(result, 'njev', 'N/A')}
+  Final loss: {result.fun}
+  Optimized parameters: {result.x}
+""")
 
     return TransientDetectorParameters(*result.x)

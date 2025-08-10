@@ -7,6 +7,8 @@ from __future__ import annotations
 import os
 from typing import List, Optional
 
+
+import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import jax.numpy as jnp
@@ -14,6 +16,8 @@ import jax.numpy as jnp
 from data import TransientExample
 from evaluation import detect_events_from_prediction
 from model import transient_detector, ExperimentHyperparameters
+
+logger = logging.getLogger(__name__)
 
 
 def _plot_audio_label(
@@ -127,7 +131,7 @@ def plot_chunks(
     for i, chunk in enumerate(chunks[:5]):
         out_path = os.path.join(out_dir, f"chunk_{i + 1}.png")
         plot_transient_example(chunk, out_path)
-    print(f"Plotted {min(5, len(chunks))} chunks to {out_dir}")
+    logger.info(f"Plotted {min(5, len(chunks))} chunks to {out_dir}")
 
 
 def plot_predictions(
@@ -159,4 +163,4 @@ def plot_predictions(
             duration_s=min(5.0, len(chunk.audio) / chunk.sample_rate),
             hyperparams=hyperparams,
         )
-        print(f"{print_prefix}Plotted prediction for chunk {i + 1} to {out_path}")
+        logger.info(f"{print_prefix}Plotted prediction for chunk {i + 1} to {out_path}")

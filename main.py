@@ -1,4 +1,5 @@
 from typing import List
+import logging
 import numpy as np
 import jax.numpy as jnp
 
@@ -14,8 +15,8 @@ from model import (
 from evaluation import evaluate_model
 from plotting import plot_predictions
 from typing import Optional
-import matplotlib.pyplot as plt  # kept for any future in-main plotting
-from plotting import plot_predictions
+
+logger = logging.getLogger(__name__)
 
 import numpy as np  # re-import for usage below
 
@@ -42,27 +43,28 @@ def train_model(hyperparams: ExperimentHyperparameters):
     )
 
     # Optimize parameters
-    print("Optimizing transient detector parameters...")
+
+    logger.info("Optimizing transient detector parameters...")
     opt_params = optimize_transient_detector(chunks, hyperparams)
-    print(f"Optimized parameters: {opt_params}")
+    logger.info(f"Optimized parameters: {opt_params}")
 
     # Evaluate optimized model across thresholds
     eval_results = evaluate_model(hyperparams, opt_params, chunks)
     # Print concise summary
-    print("Evaluation results by threshold:")
+    logger.info("Evaluation results by threshold:")
     for r in eval_results:
-        print(
+        logger.info(
             f"  th={r.threshold:.2f} | loss={r.loss:.4f} | TP={r.true_positives} FP={r.false_positives} FN={r.false_negatives} | acc={r.accuracy:.3f} rec={r.recall:.3f}"
         )
     # Select best by accuracy and recall
     best_by_acc = max(eval_results, key=lambda r: r.accuracy) if eval_results else None
     best_by_rec = max(eval_results, key=lambda r: r.recall) if eval_results else None
     if best_by_acc:
-        print(
+        logger.info(
             f"Best accuracy: th={best_by_acc.threshold:.2f}, acc={best_by_acc.accuracy:.3f}, rec={best_by_acc.recall:.3f}"
         )
     if best_by_rec:
-        print(
+        logger.info(
             f"Best recall:   th={best_by_rec.threshold:.2f}, acc={best_by_rec.accuracy:.3f}, rec={best_by_rec.recall:.3f}"
         )
 
@@ -81,6 +83,7 @@ def train_model(hyperparams: ExperimentHyperparameters):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO)
     hyperparams = ExperimentHyperparameters()
     train_model(hyperparams)
 
