@@ -105,7 +105,8 @@ class ExperimentHyperparameters:
     detector_defaults: TransientDetectorParameters = field(
         default_factory=TransientDetectorParameters
     )
-    use_differential_evolution: bool = False  # If True, run DE before L-BFGS-B
+    use_differential_evolution: bool = True  # If True, run DE before L-BFGS-B
+    disable_filters: bool = False  # If True, bypass all bandpass filtering
 
 
 def softmax_kernel(window_size: float) -> jnp.ndarray:
@@ -184,14 +185,19 @@ def compute_channel_output(
     q: float,
     sample_rate: float,
     is_training: bool,
+    hyperparams: Optional[ExperimentHyperparameters] = None,
 ) -> jnp.ndarray:
     """Compute a single channel's weighted moving average of the power envelope, with bandpass filter."""
-    b, a = design_biquad_bandpass(f0, q, sample_rate)
-    # Use FIR for training, IIR for eval
-    if is_training:
-        filtered = apply_fir_filter(audio, b, a)
+    if hyperparams is not None and getattr(hyperparams, "disable_filters", False):
+        # Bypass all filtering
+        filtered = audio
     else:
-        filtered = biquad_apply(audio, b, a)
+        b, a = design_biquad_bandpass(f0, q, sample_rate)
+        # Use FIR for training, IIR for eval
+        if is_training:
+            filtered = apply_fir_filter(audio, b, a)
+        else:
+            filtered = biquad_apply(audio, b, a)
     power = jnp.abs(filtered)
     window_samples = window_size * sample_rate
     env = moving_average(power, window_samples, is_training=is_training)
@@ -206,6 +212,7 @@ def compute_all_channels(
     qs: jnp.ndarray,
     sample_rate: float,
     is_training: bool,
+    hyperparams: Optional[ExperimentHyperparameters] = None,
 ) -> jnp.ndarray:
     """Compute all channel outputs as a JAX array."""
     n = window_sizes.shape[0]
@@ -222,6 +229,7 @@ def compute_all_channels(
             qs[i],  # type: ignore
             sample_rate,
             is_training,
+            hyperparams=hyperparams,
         )  # type: ignore
 
     return jnp.stack([channel_fn(i) for i in range(n)], axis=0)
@@ -243,6 +251,7 @@ def transient_detector(
         params.qs,
         sample_rate,
         is_training,
+        hyperparams=hyperparams,
     )
     summed = jnp.sum(channel_outputs, axis=0)
     inner = params.bias + summed

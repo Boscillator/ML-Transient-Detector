@@ -94,11 +94,31 @@ def train_model(hyperparams: ExperimentHyperparameters, train_set, val_set) -> L
 
 
 def main():
-    logging.basicConfig(level=logging.INFO)
-    hyperparams = ExperimentHyperparameters()
-    train_set, val_set = load_dataset(Path("data/export"), hyperparams, split=0.5)
-    results = train_model(hyperparams, train_set, val_set)
-    save_results('test', results)
+    from copy import deepcopy
+    from evaluation import save_results
+    from itertools import product
+
+    # Prepare data once
+    base_hyperparams = ExperimentHyperparameters()
+    train_set, val_set = load_dataset(Path("data/export"), base_hyperparams, split=0.5)
+
+    # Define grid
+    sweep_space = {
+        "num_channels": [2, 3, 4, 5],
+        "disable_filters": [True, False],
+    }
+
+    # Generate all combinations
+    for num_channels, disable_filters in product(sweep_space["num_channels"], sweep_space["disable_filters"]):
+        h = deepcopy(base_hyperparams)
+        h.num_channels = num_channels
+        h.disable_filters = disable_filters
+        run_name = f"{'nofilter' if disable_filters else 'filter'}_{num_channels}ch"
+        logger.info(f"=== Running sweep: {run_name} ===")
+        results = train_model(h, train_set, val_set)
+        if results:
+            save_results(run_name, results)
+        logger.info(f"=== Done: {run_name} ===\n")
 
 
 if __name__ == "__main__":
