@@ -30,43 +30,37 @@ MAX_KERNEL_SIZE = MAX_KERNEL_SIZE + (MAX_KERNEL_SIZE + 1) % 2
 
 @dataclass
 class TransientDetectorParameters:
-    fast_window: float = 0.01  # in seconds (can be fractional for differentiability)
-    slow_window: float = 0.1  # in seconds (can be fractional for differentiability)
-    w0: float = 0.0  # bias term
-    w1: float = 20.0  # fast_env weight
-    w2: float = -20.0  # slow_env weight
+    window_sizes: jnp.ndarray = field(default_factory=lambda: jnp.array([0.01, 0.1], dtype=jnp.float32))  # in seconds, per channel
+    weights: jnp.ndarray = field(default_factory=lambda: jnp.array([20.0, -20.0], dtype=jnp.float32))     # per channel
+    bias: float = 0.0
     post_gain: float = 1.0
     post_bias: float = 0.0
 
-
     def to_array(self, hyperparams: 'ExperimentHyperparameters') -> jnp.ndarray:
-        """Convert parameters to a JAX array in canonical order. hyperparams is reserved for future use."""
-        return jnp.array([
-            self.fast_window,
-            self.slow_window,
-            self.w0,
-            self.w1,
-            self.w2,
-            self.post_gain,
-            self.post_bias,
-        ], dtype=jnp.float32)
+        arr = jnp.concatenate([
+            jnp.asarray(self.window_sizes, dtype=jnp.float32),
+            jnp.asarray(self.weights, dtype=jnp.float32),
+            jnp.array([self.bias, self.post_gain, self.post_bias], dtype=jnp.float32)
+        ])
+        return arr
 
     @classmethod
     def from_array(cls, arr: jnp.ndarray, hyperparams: 'ExperimentHyperparameters') -> Self:
-        """Create a TransientDetectorParameters from a JAX or numpy array. hyperparams is reserved for future use."""
         arr = jnp.asarray(arr)
-
-        # We know that this array contains floats, but the type checker doesn't.
-        # However, we can't use `float()` here because the array might be a JAX tracer.
+        n = hyperparams.num_channels
+        window_sizes = arr[:n]
+        weights = arr[n:2*n]
+        bias = arr[2*n] # type: ignore
+        post_gain = arr[2*n+1] # type: ignore
+        post_bias = arr[2*n+2] # type: ignore
         return cls(
-            fast_window=arr[0], # type: ignore
-            slow_window=arr[1], # type: ignore
-            w0=arr[2], #type: ignore
-            w1=arr[3], #type: ignore
-            w2=arr[4], #type: ignore
-            post_gain=arr[5], #type: ignore
-            post_bias=arr[6], #type: ignore
+            window_sizes=window_sizes,
+            weights=weights,
+            bias=bias, # type: ignore
+            post_gain=post_gain, # type: ignore
+            post_bias=post_bias, # type: ignore
         )
+
 
 
 @jax.tree_util.register_dataclass
@@ -78,16 +72,17 @@ class ExperimentHyperparameters:
     overlap_s: float = 1.0
     window_s: float = 0.04  # for label generation
     loss_epsilon: float = 1e-7
-    # Bounds for optimization (in order of TransientDetectorParameters fields)
-    bounds: tuple = (
-        (1e-3, 0.5),  # fast_window
-        (1e-3, 0.5),  # slow_window
-        (-500.0, 500.0),  # w0
-        (-500.0, 500.0),  # w1
-        (-500.0, 500.0),  # w2
-        (-1e4, 1e4),  # post_gain
-        (-1.0, 1.0),  # post_bias
-    )
+    num_channels: int = 2
+    window_defaults: list = field(default_factory=lambda: [0.01, 0.1])
+    weight_defaults: list = field(default_factory=lambda: [20.0, -20.0])
+    # Bounds for optimization (all windows, all weights, bias, post_gain, post_bias)
+    bounds: list = field(default_factory=lambda: [
+        (1e-3, 0.5), (1e-3, 0.5),   # window sizes
+        (-500.0, 500.0), (-500.0, 500.0),  # weights
+        (-500.0, 500.0),            # bias
+        (-1e4, 1e4),                # post_gain
+        (-1.0, 1.0),                # post_bias
+    ])
     detector_defaults: TransientDetectorParameters = field(
         default_factory=TransientDetectorParameters
     )
@@ -161,6 +156,23 @@ def internal_debug(i, data):
     plt.close(fig)
 
 
+
+
+def compute_channel_output(audio: jnp.ndarray, window_size: float, weight: float, sample_rate: float, is_training: bool) -> jnp.ndarray:
+    """Compute a single channel's weighted moving average of the power envelope."""
+    power = jnp.abs(audio)
+    window_samples = window_size * sample_rate
+    env = moving_average(power, window_samples, is_training=is_training)
+    return weight * env
+
+def compute_all_channels(audio: jnp.ndarray, window_sizes: jnp.ndarray, weights: jnp.ndarray, sample_rate: float, is_training: bool) -> jnp.ndarray:
+    """Compute all channel outputs as a JAX array."""
+    n = window_sizes.shape[0]
+    assert n == weights.shape[0], "window_sizes and weights must have same length"
+    def channel_fn(i):
+        return compute_channel_output(audio, window_sizes[i], weights[i], sample_rate, is_training) # type: ignore
+    return jnp.stack([channel_fn(i) for i in range(n)], axis=0)
+
 def transient_detector(
     params: TransientDetectorParameters,
     audio: jnp.ndarray,
@@ -169,33 +181,26 @@ def transient_detector(
     is_training: bool = True,
     hyperparams: Optional[ExperimentHyperparameters] = None,
 ) -> jnp.ndarray:
-    # Convert window sizes from seconds to samples
-    envelop1_window_samples = params.fast_window * sample_rate
-    envelop2_window_samples = params.slow_window * sample_rate
-
-    power = jnp.abs(audio)
-
-    envelop1 = moving_average(power, envelop1_window_samples, is_training=is_training)
-    envelop2 = moving_average(power, envelop2_window_samples, is_training=is_training)
-
-    inner = params.w0 + params.w1 * envelop1 + params.w2 * envelop2
+    channel_outputs = compute_all_channels(audio, params.window_sizes, params.weights, sample_rate, is_training)
+    summed = jnp.sum(channel_outputs, axis=0)
+    inner = params.bias + summed
     outer = params.post_gain * inner + params.post_bias
     result = jax.nn.sigmoid(outer)
 
     if do_debug:
         global _dbg_n
-        internal_debug(
-            _dbg_n,
-            {
-                "audio": audio,
-                "power": power,
-                "envelop1": envelop1,
-                "envelop2": envelop2,
-                "inner": inner,
-                "outer": outer,
-                "result": result,
-            },
-        )
+        n = params.window_sizes.shape[0]
+        debug_data = {
+            "audio": audio,
+            "power": jnp.abs(audio),
+            **{f"env_{i}": channel_outputs[i] / params.weights[i] if params.weights[i] != 0 else channel_outputs[i] for i in range(n)},
+            **{f"weighted_env_{i}": channel_outputs[i] for i in range(n)},
+            "summed": summed,
+            "inner": inner,
+            "outer": outer,
+            "result": result,
+        }
+        internal_debug(_dbg_n, debug_data)
         _dbg_n += 1
 
     return result
