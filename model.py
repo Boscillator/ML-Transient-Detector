@@ -30,38 +30,46 @@ MAX_KERNEL_SIZE = MAX_KERNEL_SIZE + (MAX_KERNEL_SIZE + 1) % 2
 
 @dataclass
 class TransientDetectorParameters:
-    window_sizes: jnp.ndarray = field(default_factory=lambda: jnp.array([0.01, 0.1, 0.001], dtype=jnp.float32))  # in seconds, per channel
-    weights: jnp.ndarray = field(default_factory=lambda: jnp.array([20.0, -20.0, -10.0], dtype=jnp.float32))     # per channel
+    window_sizes: jnp.ndarray = field(
+        default_factory=lambda: jnp.array([0.01, 0.1, 0.001], dtype=jnp.float32)
+    )  # in seconds, per channel
+    weights: jnp.ndarray = field(
+        default_factory=lambda: jnp.array([20.0, -20.0, -10.0], dtype=jnp.float32)
+    )  # per channel
     bias: float = 0.0
     post_gain: float = 1.0
     post_bias: float = 0.0
 
-    def to_array(self, hyperparams: 'ExperimentHyperparameters') -> jnp.ndarray:
-        arr = jnp.concatenate([
-            jnp.asarray(self.window_sizes, dtype=jnp.float32),
-            jnp.asarray(self.weights, dtype=jnp.float32),
-            jnp.array([self.bias, self.post_gain, self.post_bias], dtype=jnp.float32)
-        ])
+    def to_array(self, hyperparams: "ExperimentHyperparameters") -> jnp.ndarray:
+        arr = jnp.concatenate(
+            [
+                jnp.asarray(self.window_sizes, dtype=jnp.float32),
+                jnp.asarray(self.weights, dtype=jnp.float32),
+                jnp.array(
+                    [self.bias, self.post_gain, self.post_bias], dtype=jnp.float32
+                ),
+            ]
+        )
         return arr
 
     @classmethod
-    def from_array(cls, arr: jnp.ndarray, hyperparams: 'ExperimentHyperparameters') -> Self:
+    def from_array(
+        cls, arr: jnp.ndarray, hyperparams: "ExperimentHyperparameters"
+    ) -> Self:
         arr = jnp.asarray(arr)
         n = hyperparams.num_channels
         window_sizes = arr[:n]
-        weights = arr[n:2*n]
-        bias = arr[2*n] # type: ignore
-        post_gain = arr[2*n+1] # type: ignore
-        post_bias = arr[2*n+2] # type: ignore
+        weights = arr[n : 2 * n]
+        bias = arr[2 * n]  # type: ignore
+        post_gain = arr[2 * n + 1]  # type: ignore
+        post_bias = arr[2 * n + 2]  # type: ignore
         return cls(
             window_sizes=window_sizes,
             weights=weights,
-            bias=bias, # type: ignore
-            post_gain=post_gain, # type: ignore
-            post_bias=post_bias, # type: ignore
+            bias=bias,  # type: ignore
+            post_gain=post_gain,  # type: ignore
+            post_bias=post_bias,  # type: ignore
         )
-
-
 
 
 @jax.tree_util.register_dataclass
@@ -152,22 +160,38 @@ def internal_debug(i, data):
     plt.close(fig)
 
 
-
-
-def compute_channel_output(audio: jnp.ndarray, window_size: float, weight: float, sample_rate: float, is_training: bool) -> jnp.ndarray:
+def compute_channel_output(
+    audio: jnp.ndarray,
+    window_size: float,
+    weight: float,
+    sample_rate: float,
+    is_training: bool,
+) -> jnp.ndarray:
     """Compute a single channel's weighted moving average of the power envelope."""
     power = jnp.abs(audio)
     window_samples = window_size * sample_rate
     env = moving_average(power, window_samples, is_training=is_training)
     return weight * env
 
-def compute_all_channels(audio: jnp.ndarray, window_sizes: jnp.ndarray, weights: jnp.ndarray, sample_rate: float, is_training: bool) -> jnp.ndarray:
+
+def compute_all_channels(
+    audio: jnp.ndarray,
+    window_sizes: jnp.ndarray,
+    weights: jnp.ndarray,
+    sample_rate: float,
+    is_training: bool,
+) -> jnp.ndarray:
     """Compute all channel outputs as a JAX array."""
     n = window_sizes.shape[0]
     assert n == weights.shape[0], "window_sizes and weights must have same length"
+
     def channel_fn(i):
-        return compute_channel_output(audio, window_sizes[i], weights[i], sample_rate, is_training) # type: ignore
+        return compute_channel_output(
+            audio, window_sizes[i], weights[i], sample_rate, is_training
+        )  # type: ignore
+
     return jnp.stack([channel_fn(i) for i in range(n)], axis=0)
+
 
 def transient_detector(
     params: TransientDetectorParameters,
@@ -177,7 +201,9 @@ def transient_detector(
     is_training: bool = True,
     hyperparams: Optional[ExperimentHyperparameters] = None,
 ) -> jnp.ndarray:
-    channel_outputs = compute_all_channels(audio, params.window_sizes, params.weights, sample_rate, is_training)
+    channel_outputs = compute_all_channels(
+        audio, params.window_sizes, params.weights, sample_rate, is_training
+    )
     summed = jnp.sum(channel_outputs, axis=0)
     inner = params.bias + summed
     outer = params.post_gain * inner + params.post_bias
@@ -189,7 +215,12 @@ def transient_detector(
         debug_data = {
             "audio": audio,
             "power": jnp.abs(audio),
-            **{f"env_{i}": channel_outputs[i] / params.weights[i] if params.weights[i] != 0 else channel_outputs[i] for i in range(n)},
+            **{
+                f"env_{i}": channel_outputs[i] / params.weights[i]
+                if params.weights[i] != 0
+                else channel_outputs[i]
+                for i in range(n)
+            },
             **{f"weighted_env_{i}": channel_outputs[i] for i in range(n)},
             "summed": summed,
             "inner": inner,
@@ -268,23 +299,24 @@ def optimize_transient_detector(
     # JAX grad for the loss function
     loss_grad = jax.grad(lambda p: loss_for_params(p))
 
-
     default_params = TransientDetectorParameters()
     x0 = np.array(default_params.to_array(hyperparams), dtype=np.float32)
 
     # Build bounds for all parameters
     n = hyperparams.num_channels
     bounds = (
-        [hyperparams.window_bounds] * n +
-        [hyperparams.weight_bounds] * n +
-        [hyperparams.bias_bounds] +
-        [hyperparams.post_gain_bounds] +
-        [hyperparams.post_bias_bounds]
+        [hyperparams.window_bounds] * n
+        + [hyperparams.weight_bounds] * n
+        + [hyperparams.bias_bounds]
+        + [hyperparams.post_gain_bounds]
+        + [hyperparams.post_bias_bounds]
     )
 
     # Progress display callback
     def progress_callback(xk):
-        logger.info(f"Current: {TransientDetectorParameters.from_array(xk, hyperparams)}")
+        logger.info(
+            f"Current: {TransientDetectorParameters.from_array(xk, hyperparams)}"
+        )
 
     result = scipy.optimize.minimize(
         loss_for_params,
@@ -296,7 +328,6 @@ def optimize_transient_detector(
         callback=progress_callback,
     )
 
-
     # Log optimization result details
     logger.info(f"""
 Optimization finished.
@@ -304,7 +335,7 @@ Optimization finished.
   Status: {result.status}
   Message: {result.message}
   Function evaluations: {result.nfev}
-  Gradient evaluations: {getattr(result, 'njev', 'N/A')}
+  Gradient evaluations: {getattr(result, "njev", "N/A")}
   Final loss: {result.fun}
   Optimized parameters: {result.x}
 """)
