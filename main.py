@@ -190,6 +190,7 @@ def plot_chunk_with_prediction(
     prediction: jnp.ndarray,
     out_path: str = "data/plots/chunk_with_prediction.png",
     duration_s: float = 1.0,
+    hyperparams: Optional["ExperimentHyperparameters"] = None,
 ) -> None:
     import jax.numpy as jnp
 
@@ -217,10 +218,31 @@ def plot_chunk_with_prediction(
         alpha=0.7,
         linewidth=1.5,
     )
+
+    # Plot vertical lines for true transient times (ground truth)
+    for tt in chunk.transient_times:
+        if 0 <= tt <= duration_s:
+            ax2.axvline(tt, color="g", linestyle="--", alpha=0.7, label="True Event" if tt == chunk.transient_times[0] else None)
+
+    # Plot vertical lines for predicted transient times
+    # Use detect_events_from_prediction with threshold 0.5 and window_s from hyperparams
+    if hyperparams is not None:
+        window_s = hyperparams.window_s
+    else:
+        window_s = 0.04
+    pred_times = detect_events_from_prediction(np.asarray(prediction), 0.5, sr, window_s)
+    for i, pt in enumerate(pred_times):
+        if 0 <= pt <= duration_s:
+            ax2.axvline(pt, color="r", linestyle=":", alpha=0.7, label="Pred Event" if i == 0 else None)
+
     ax2.set_ylabel("Label / Prediction")
     ax1.set_title(f"Audio, Label, and Prediction (First {duration_s} Second(s))")
     ax1.set_xlim(0, duration_s)
-    ax2.legend(loc="upper right")
+    handles, labels = ax2.get_legend_handles_labels()
+    # Remove duplicate labels
+    from collections import OrderedDict
+    by_label = OrderedDict(zip(labels, handles))
+    ax2.legend(by_label.values(), by_label.keys(), loc="upper right")
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path)
@@ -291,6 +313,7 @@ def plot_predictions(
             pred,
             out_path,
             duration_s=min(5.0, len(chunk.audio) / chunk.sample_rate),
+            hyperparams=hyperparams,
         )
         print(f"{print_prefix}Plotted prediction for chunk {i + 1} to {out_path}")
 
@@ -363,8 +386,7 @@ def moving_average(
     """
 
     if is_training:
-        # kernel = softmax_kernel(window_size)
-        kernel = rectangle_kernel(window_size)
+        kernel = softmax_kernel(window_size)
     else:
         kernel = rectangle_kernel(window_size)
 
@@ -521,6 +543,171 @@ def optimize_transient_detector(
 
     return TransientDetectorParameters(*result.x)
 
+@dataclass
+class EvaluationResult:
+    params: TransientDetectorParameters
+    loss: float
+    threshold: float
+    false_positives: int
+    false_negatives: int
+    true_positives: int
+    true_negatives: int
+    accuracy: float
+    recall: float
+
+
+def detect_events_from_prediction(
+    preds_np,
+    threshold: float,
+    sample_rate: float,
+    window_s: float,
+) -> list[float]:
+    """
+    Detect event times from a prediction array using upward threshold crossings with latching and a refractory period.
+    Returns a list of event times (in seconds).
+    """
+    # Ensure numpy is available for type and array ops
+    import numpy as np
+    refractory_s = window_s
+    pred_times: list[float] = []
+    last_det_time = -1e9
+    went_below_since_last = True  # allow first crossing
+    for i in range(1, len(preds_np)):
+        t_prev = (i - 1) / sample_rate
+        t_cur = i / sample_rate
+        if preds_np[i] <= threshold:
+            went_below_since_last = True
+        if (
+            preds_np[i - 1] <= threshold
+            and preds_np[i] > threshold
+            and went_below_since_last
+            and (t_cur - last_det_time) >= refractory_s
+        ):
+            pred_times.append(t_cur)
+            last_det_time = t_cur
+            went_below_since_last = False
+    return pred_times
+
+def evaluate_model_for_threshold(
+    hparams: ExperimentHyperparameters,
+    params: TransientDetectorParameters,
+    data: List[TransientExample],
+    threshold: float,
+) -> EvaluationResult:
+    # Event-based evaluation: use detection function for event times
+    tol_s = hparams.window_s / 2.0
+
+    total_event_tp = 0
+    total_event_fp = 0
+    total_event_fn = 0
+
+    # Sample-based confusion (for optional accuracy reporting)
+    sample_tp = 0
+    sample_fp = 0
+    sample_tn = 0
+    sample_fn = 0
+
+    total_loss_sum = 0.0
+    total_count = 0
+
+    for ex in data:
+        sr = ex.sample_rate
+        preds = transient_detector(
+            params,
+            jnp.asarray(ex.audio),
+            sr,
+            do_debug=False,
+            is_training=False,
+            hyperparams=hparams,
+        )
+        preds_np = np.asarray(preds)
+
+        # Sample-wise confusion
+        y_true = ex.label_array > 0.5
+        y_pred = preds_np > threshold
+        sample_tp += int(np.sum(np.logical_and(y_true, y_pred)))
+        sample_fp += int(np.sum(np.logical_and(~y_true, y_pred)))
+        sample_tn += int(np.sum(np.logical_and(~y_true, ~y_pred)))
+        sample_fn += int(np.sum(np.logical_and(y_true, ~y_pred)))
+
+        # Loss (weighted by sample count)
+        loss_val = float(loss_function(jnp.asarray(ex.label_array), preds, hparams))
+        total_loss_sum += loss_val * len(ex.label_array)
+        total_count += len(ex.label_array)
+
+        # Use new detection function
+        pred_times = detect_events_from_prediction(
+            preds_np, threshold, sr, hparams.window_s
+        )
+
+        # Event matching to ground truth
+        gt_times = list(ex.transient_times)
+        matched_gt = [False] * len(gt_times)
+        event_tp = 0
+        event_fp = 0
+
+        for pt in pred_times:
+            # find nearest unmatched gt within tolerance
+            best_j = -1
+            best_dt = float("inf")
+            for j, gt in enumerate(gt_times):
+                if matched_gt[j]:
+                    continue
+                dt = abs(pt - gt)
+                if dt < best_dt:
+                    best_dt = dt
+                    best_j = j
+            if best_j != -1 and best_dt <= tol_s:
+                matched_gt[best_j] = True
+                event_tp += 1
+            else:
+                event_fp += 1
+
+        event_fn = matched_gt.count(False)
+
+        total_event_tp += event_tp
+        total_event_fp += event_fp
+        total_event_fn += event_fn
+
+    # Aggregate metrics
+    mean_loss = (total_loss_sum / max(1, total_count)) if total_count > 0 else 0.0
+
+    # Event-based recall and a simple "accuracy" notion over events
+    recall = (
+        total_event_tp / max(1, (total_event_tp + total_event_fn))
+        if (total_event_tp + total_event_fn) > 0
+        else 0.0
+    )
+    accuracy = (
+        total_event_tp / max(1, (total_event_tp + total_event_fp + total_event_fn))
+        if (total_event_tp + total_event_fp + total_event_fn) > 0
+        else 0.0
+    )
+
+    return EvaluationResult(
+        params=params,
+        loss=mean_loss,
+        threshold=threshold,
+        false_positives=total_event_fp,
+        false_negatives=total_event_fn,
+        true_positives=total_event_tp,
+        true_negatives=0,  # TN not well-defined for event detection; leave as 0
+        accuracy=accuracy,
+        recall=recall,
+    )
+
+
+def evaluate_model(
+    hparams: ExperimentHyperparameters,
+    params: TransientDetectorParameters,
+    data: List[TransientExample],
+) -> List[EvaluationResult]:
+    # Evaluate across a sweep of thresholds
+    thresholds = np.linspace(0.1, 0.9, 9, dtype=np.float32)
+    results: List[EvaluationResult] = []
+    for th in thresholds:
+        results.append(evaluate_model_for_threshold(hparams, params, data, float(th)))
+    return results
 
 def main() -> None:
     hyperparams = ExperimentHyperparameters()
@@ -544,22 +731,30 @@ def main() -> None:
         print_prefix="",
     )
 
-    # Plot predictions with training (softmax) kernel
-    plot_predictions(
-        chunks,
-        params,
-        output_dir="data/plots/chunk_preds_training",
-        is_training=True,
-        hyperparams=hyperparams,
-        do_debug=True,
-        prefix="",
-        print_prefix="Training kernel: ",
-    )
-
     # Optimize parameters
     print("Optimizing transient detector parameters...")
     opt_params = optimize_transient_detector(chunks, hyperparams)
     print(f"Optimized parameters: {opt_params}")
+
+    # Evaluate optimized model across thresholds
+    eval_results = evaluate_model(hyperparams, opt_params, chunks)
+    # Print concise summary
+    print("Evaluation results by threshold:")
+    for r in eval_results:
+        print(
+            f"  th={r.threshold:.2f} | loss={r.loss:.4f} | TP={r.true_positives} FP={r.false_positives} FN={r.false_negatives} | acc={r.accuracy:.3f} rec={r.recall:.3f}"
+        )
+    # Select best by accuracy and recall
+    best_by_acc = max(eval_results, key=lambda r: r.accuracy) if eval_results else None
+    best_by_rec = max(eval_results, key=lambda r: r.recall) if eval_results else None
+    if best_by_acc:
+        print(
+            f"Best accuracy: th={best_by_acc.threshold:.2f}, acc={best_by_acc.accuracy:.3f}, rec={best_by_acc.recall:.3f}"
+        )
+    if best_by_rec:
+        print(
+            f"Best recall:   th={best_by_rec.threshold:.2f}, acc={best_by_rec.accuracy:.3f}, rec={best_by_rec.recall:.3f}"
+        )
 
     # Plot predictions after optimization
     plot_predictions(
