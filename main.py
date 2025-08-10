@@ -28,7 +28,9 @@ class TransientExample:
 
 
 def load_transient_example(
-    base_path: str, window_s: Optional[float] = None
+    base_path: str,
+    hyperparams: "ExperimentHyperparameters",
+    window_s: Optional[float] = None,
 ) -> TransientExample:
     """
     Given a base file path (without extension), load the wav and txt, generate label array, and return a TransientExample.
@@ -39,9 +41,9 @@ def load_transient_example(
     audio, sr = load_wav_mono_normalized(audio_path)
     transient_times = load_transient_times(label_path)
     if window_s is None:
-        window_s = ExperimentHyperparameters.window_s
+        window_s = hyperparams.window_s
     label_array = generate_label_array(
-        transient_times, len(audio), sr, window_s=window_s
+        transient_times, len(audio), sr, window_s=window_s, hyperparams=hyperparams
     )
     return TransientExample(
         audio=audio,
@@ -79,6 +81,7 @@ def generate_label_array(
     audio_length: int,
     sr: int,
     window_s: Optional[float] = None,
+    hyperparams: Optional["ExperimentHyperparameters"] = None,
 ) -> np.ndarray:
     """
     Generate a label array (0.0/1.0) for the given transient times.
@@ -86,7 +89,10 @@ def generate_label_array(
     """
     label = np.zeros(audio_length, dtype=np.float32)
     if window_s is None:
-        window_s = ExperimentHyperparameters.window_s
+        if hyperparams is not None:
+            window_s = hyperparams.window_s
+        else:
+            window_s = 0.04
     half_window = window_s / 2.0
     for t in transient_times:
         start = int(max(0, (t - half_window) * sr))
@@ -125,6 +131,7 @@ def plot_transient_example(
 
 def chunkify_examples(
     example: "TransientExample",
+    hyperparams: "ExperimentHyperparameters",
     min_length_s: Optional[float] = None,
     max_length_s: Optional[float] = None,
     overlap_s: Optional[float] = None,
@@ -141,11 +148,11 @@ def chunkify_examples(
     chunks = []
     start_sample = 0
     if min_length_s is None:
-        min_length_s = ExperimentHyperparameters.min_length_s
+        min_length_s = hyperparams.min_length_s
     if max_length_s is None:
-        max_length_s = ExperimentHyperparameters.max_length_s
+        max_length_s = hyperparams.max_length_s
     if overlap_s is None:
-        overlap_s = ExperimentHyperparameters.overlap_s
+        overlap_s = hyperparams.overlap_s
     while start_sample < total_len:
         chunk_length_s = random.uniform(min_length_s, max_length_s)
         chunk_length = int(chunk_length_s * sr)
@@ -262,6 +269,7 @@ def plot_predictions(
     params,
     output_dir,
     is_training,
+    hyperparams,
     do_debug=True,
     prefix="",
     print_prefix="",
@@ -275,6 +283,7 @@ def plot_predictions(
             chunk.sample_rate,
             do_debug=do_debug,
             is_training=is_training,
+            hyperparams=hyperparams,
         )
         out_path = f"{output_dir}/{prefix}chunk_{i + 1}_pred.png"
         plot_chunk_with_prediction(
@@ -301,7 +310,7 @@ class TransientDetectorParameters:
 # Experiment-level hyperparameters dataclass
 @dataclass
 class ExperimentHyperparameters:
-    DEVICE: str = "gpu"  # or 'cpu'
+    device: str = "gpu"  # or 'cpu'
     min_length_s: float = 5.0
     max_length_s: float = 10.0
     overlap_s: float = 1.0
@@ -320,10 +329,6 @@ class ExperimentHyperparameters:
     detector_defaults: TransientDetectorParameters = field(
         default_factory=TransientDetectorParameters
     )
-
-
-# Set detector_defaults after class definition to avoid forward reference issues
-ExperimentHyperparameters.detector_defaults = TransientDetectorParameters()
 
 
 def softmax_kernel(window_size: float) -> jnp.ndarray:
@@ -375,6 +380,7 @@ def transient_detector(
     sample_rate: float,
     do_debug: bool = False,
     is_training: bool = True,
+    hyperparams: Optional["ExperimentHyperparameters"] = None,
 ) -> jnp.ndarray:
     # Convert window sizes from seconds to samples
     envelop1_window_samples = params.fast_window * sample_rate
@@ -409,9 +415,13 @@ def transient_detector(
     return result
 
 
-def loss_function(target: jnp.ndarray, prediction: jnp.ndarray) -> jnp.ndarray:
+def loss_function(
+    target: jnp.ndarray,
+    prediction: jnp.ndarray,
+    hyperparams: "ExperimentHyperparameters",
+) -> jnp.ndarray:
     # Binary cross entropy loss
-    eps = ExperimentHyperparameters.loss_epsilon
+    eps = hyperparams.loss_epsilon
     prediction = jnp.clip(prediction, eps, 1 - eps)
     loss = -(target * jnp.log(prediction) + (1 - target) * jnp.log(1 - prediction))
     return jnp.mean(loss)
@@ -419,6 +429,7 @@ def loss_function(target: jnp.ndarray, prediction: jnp.ndarray) -> jnp.ndarray:
 
 def optimize_transient_detector(
     chunks: List[TransientExample],
+    hyperparams: "ExperimentHyperparameters",
 ) -> TransientDetectorParameters:
     # Prepare arrays for vmap
     audio_arrs = [jnp.asarray(chunk.audio) for chunk in chunks]
@@ -437,7 +448,7 @@ def optimize_transient_detector(
     valid_lengths = jnp.array([len(a) for a in audio_arrs])
 
     # Move all batch arrays to the selected device
-    device = jax.devices(ExperimentHyperparameters.DEVICE)[0]
+    device = jax.devices(hyperparams.device)[0]
     audio_batch = jax.device_put(audio_batch, device)
     label_batch = jax.device_put(label_batch, device)
     sample_rate_batch = jax.device_put(sample_rate_batch, device)
@@ -454,11 +465,13 @@ def optimize_transient_detector(
             post_gain=post_gain,
             post_bias=post_bias,
         )
-        pred = transient_detector(params, audio, sample_rate, is_training=True)
+        pred = transient_detector(
+            params, audio, sample_rate, is_training=True, hyperparams=hyperparams
+        )
         # Create mask for valid (unpadded) region
         mask = jnp.arange(label.shape[0]) < valid_len
         # Compute loss over all elements, mask out padded region
-        loss = loss_function(label, pred)
+        loss = loss_function(label, pred, hyperparams)
         # Masked mean: sum only valid elements
         masked_loss = jnp.sum(loss * mask) / jnp.maximum(1, jnp.sum(mask))
         return masked_loss * valid_len, valid_len
@@ -478,8 +491,19 @@ def optimize_transient_detector(
     loss_grad = jax.grad(lambda p: loss_for_params(p))
 
     default_params = TransientDetectorParameters()
-    x0 = np.array(astuple(default_params), dtype=np.float32)
-    bounds = list(ExperimentHyperparameters.bounds)
+    x0 = np.array(
+        [
+            default_params.fast_window,
+            default_params.slow_window,
+            default_params.w0,
+            default_params.w1,
+            default_params.w2,
+            default_params.post_gain,
+            default_params.post_bias,
+        ],
+        dtype=np.float32,
+    )
+    bounds = list(hyperparams.bounds)
 
     # Progress display callback
     def progress_callback(xk):
@@ -499,11 +523,12 @@ def optimize_transient_detector(
 
 
 def main() -> None:
+    hyperparams = ExperimentHyperparameters()
     # Load and plot an example
     base_path = "data/export/DarkIllusion_ElecGtr5DI"
-    example = load_transient_example(base_path)
-    chunks = chunkify_examples(example)
-    chunks = chunks[:5]  # Limit to first 10 chunks for testing
+    example = load_transient_example(base_path, hyperparams)
+    chunks = chunkify_examples(example, hyperparams)
+    chunks = chunks[:5]  # Limit to first 5 chunks for testing
 
     params = TransientDetectorParameters()
 
@@ -513,6 +538,7 @@ def main() -> None:
         params,
         output_dir="data/plots/chunk_preds",
         is_training=False,
+        hyperparams=hyperparams,
         do_debug=True,
         prefix="",
         print_prefix="",
@@ -524,6 +550,7 @@ def main() -> None:
         params,
         output_dir="data/plots/chunk_preds_training",
         is_training=True,
+        hyperparams=hyperparams,
         do_debug=True,
         prefix="",
         print_prefix="Training kernel: ",
@@ -531,7 +558,7 @@ def main() -> None:
 
     # Optimize parameters
     print("Optimizing transient detector parameters...")
-    opt_params = optimize_transient_detector(chunks)
+    opt_params = optimize_transient_detector(chunks, hyperparams)
     print(f"Optimized parameters: {opt_params}")
 
     # Plot predictions after optimization
@@ -540,6 +567,7 @@ def main() -> None:
         opt_params,
         output_dir="data/plots/chunk_preds_optimized",
         is_training=False,
+        hyperparams=hyperparams,
         do_debug=True,
         prefix="",
         print_prefix="Optimized: ",
