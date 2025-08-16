@@ -14,7 +14,7 @@ from model import (
     TransientDetectorParameters,
     optimize_transient_detector,
 )
-from evaluation import EvaluationResult, evaluate_model, save_results
+from evaluation import EvaluationResult, evaluate_train_and_val, save_results
 from plotting import plot_predictions
 from typing import Optional
 
@@ -55,28 +55,28 @@ def train_model(hyperparams: ExperimentHyperparameters, train_set, val_set) -> L
     )
 
     with jax.default_device(cpu):
-        # Evaluate optimized model on validation set across thresholds
-        eval_results = evaluate_model(hyperparams, opt_params_cpu, val_set)
+        # Evaluate optimized model on both train and validation sets across thresholds
+        eval_results = evaluate_train_and_val(hyperparams, opt_params_cpu, train_set, val_set)
         # Print concise summary
-        logger.info("Validation results by threshold:")
+        logger.info("Results by threshold:")
         for r in eval_results:
             logger.info(
-                f"  th={r.threshold:.2f} | loss={r.loss:.4f} | TP={r.true_positives} FP={r.false_positives} FN={r.false_negatives} | acc={r.accuracy:.3f} rec={r.recall:.3f}"
+                f"  th={r.val_result.threshold:.2f} | train: acc={r.train_result.accuracy:.3f} rec={r.train_result.recall:.3f} | val: acc={r.val_result.accuracy:.3f} rec={r.val_result.recall:.3f}"
             )
-        # Select best by accuracy and recall
+        # Select best by validation accuracy and recall
         best_by_acc = (
-            max(eval_results, key=lambda r: r.accuracy) if eval_results else None
+            max(eval_results, key=lambda r: r.val_result.accuracy) if eval_results else None
         )
         best_by_rec = (
-            max(eval_results, key=lambda r: r.recall) if eval_results else None
+            max(eval_results, key=lambda r: r.val_result.recall) if eval_results else None
         )
         if best_by_acc:
             logger.info(
-                f"Best accuracy: th={best_by_acc.threshold:.2f}, acc={best_by_acc.accuracy:.3f}, rec={best_by_acc.recall:.3f}"
+                f"Best val accuracy: th={best_by_acc.val_result.threshold:.2f}, acc={best_by_acc.val_result.accuracy:.3f}, rec={best_by_acc.val_result.recall:.3f}"
             )
         if best_by_rec:
             logger.info(
-                f"Best recall:   th={best_by_rec.threshold:.2f}, acc={best_by_rec.accuracy:.3f}, rec={best_by_rec.recall:.3f}"
+                f"Best val recall:   th={best_by_rec.val_result.threshold:.2f}, acc={best_by_rec.val_result.accuracy:.3f}, rec={best_by_rec.val_result.recall:.3f}"
             )
 
         # Plot predictions after optimization (force CPU for IIR eval)
@@ -99,9 +99,13 @@ def main():
     from evaluation import save_results
     from itertools import product
 
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
     # Prepare data once
     base_hyperparams = ExperimentHyperparameters()
-    train_set, val_set = load_dataset(Path("data/export"), base_hyperparams, split=0.5)
+    train_set, val_set = load_dataset(Path("data/export"), base_hyperparams, split=0.2)
+
+    logger.info(f"Loaded {len(train_set)} training and {len(val_set)} validation examples from dataset.")
 
     # Define grid
     sweep_space = {
@@ -116,6 +120,8 @@ def main():
         h.disable_filters = disable_filters
         run_name = f"{'nofilter' if disable_filters else 'filter'}_{num_channels}ch"
         logger.info(f"=== Running sweep: {run_name} ===")
+
+        logger.info(f"Training model with {num_channels} channels, filters {'disabled' if disable_filters else 'enabled'}")
         results = train_model(h, train_set, val_set)
         if results:
             save_results(run_name, results)

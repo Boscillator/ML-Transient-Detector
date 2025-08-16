@@ -387,9 +387,6 @@ def optimize_transient_detector(chunks, hyperparams: ExperimentHyperparameters):
             popsize=15,
             disp=True,
             polish=False,
-            callback=lambda x, cov: logger.info(
-                f"DE iteration: {TransientDetectorParameters.from_array(x, hyperparams)}, {cov}"
-            ),
         )
         logger.info(
             f"DE finished. Loss: {de_result.fun}, x0: {TransientDetectorParameters.from_array(de_result.x, hyperparams)}"

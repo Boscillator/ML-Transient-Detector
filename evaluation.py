@@ -25,9 +25,10 @@ from model import (
 logger = logging.getLogger(__name__)
 
 
+
+# Common metrics dataclass
 @dataclass
-class EvaluationResult:
-    params: TransientDetectorParameters
+class EvaluationMetrics:
     loss: float
     threshold: float
     false_positives: int
@@ -36,6 +37,13 @@ class EvaluationResult:
     true_negatives: int
     accuracy: float
     recall: float
+
+
+@dataclass
+class EvaluationResult:
+    params: TransientDetectorParameters
+    train_result: EvaluationMetrics
+    val_result: EvaluationMetrics
 
 
 def detect_events_from_prediction(
@@ -68,12 +76,12 @@ def detect_events_from_prediction(
     return pred_times
 
 
-def evaluate_model_for_threshold(
+def evaluate_metrics_for_threshold(
     hparams: ExperimentHyperparameters,
     params: TransientDetectorParameters,
     data: List[TransientExample],
     threshold: float,
-) -> EvaluationResult:
+) -> EvaluationMetrics:
     # Event-based evaluation: use detection function for event times
     tol_s = hparams.window_s / 2.0
 
@@ -164,8 +172,7 @@ def evaluate_model_for_threshold(
         else 0.0
     )
 
-    return EvaluationResult(
-        params=params,
+    return EvaluationMetrics(
         loss=mean_loss,
         threshold=threshold,
         false_positives=total_event_fp,
@@ -177,18 +184,42 @@ def evaluate_model_for_threshold(
     )
 
 
-def evaluate_model(
+
+
+def evaluate_metrics(
     hparams: ExperimentHyperparameters,
     params: TransientDetectorParameters,
     data: List[TransientExample],
-) -> List[EvaluationResult]:
-    logger.info("Evaluating model")
-    # Evaluate across a sweep of thresholds
+) -> list[EvaluationMetrics]:
+    logger.info("Evaluating metrics")
     thresholds = np.linspace(0.1, 0.9, 9, dtype=np.float32)
-    results: List[EvaluationResult] = []
+    results: list[EvaluationMetrics] = []
     for th in thresholds:
-        results.append(evaluate_model_for_threshold(hparams, params, data, float(th)))
-    logger.info("Done evaluating model")
+        results.append(evaluate_metrics_for_threshold(hparams, params, data, float(th)))
+    logger.info("Done evaluating metrics")
+    return results
+
+
+
+# --- Evaluate both train and validation sets ---
+def evaluate_train_and_val(
+    hparams: ExperimentHyperparameters,
+    params: TransientDetectorParameters,
+    train_data: List[TransientExample],
+    val_data: List[TransientExample],
+) -> list[EvaluationResult]:
+    """
+    Evaluate model on both train and validation sets for each threshold.
+    Returns a list of EvaluationResult, one per threshold.
+    """
+    logger.info("Evaluating train set...")
+    train_metrics = evaluate_metrics(hparams, params, train_data)
+    logger.info("Evaluating validation set...")
+    val_metrics = evaluate_metrics(hparams, params, val_data)
+    # Assume thresholds are the same for both
+    results = []
+    for train_result, val_result in zip(train_metrics, val_metrics):
+        results.append(EvaluationResult(params=params, train_result=train_result, val_result=val_result))
     return results
 
 
@@ -242,8 +273,9 @@ def save_results(run_name: str, results: List[EvaluationResult]):
 
     for res in results:
         res_dict = make_serializable(res)
-        acc = float(res.accuracy)
-        th = float(res.threshold)
+        # Use validation accuracy/threshold for filename
+        acc = float(res.val_result.accuracy)
+        th = float(res.val_result.threshold)
         filename = f"{acc:.3f}_th{th:.2f}_{run_name}.json"
         out_path = results_dir / filename
         with open(out_path, "w") as f:
