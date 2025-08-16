@@ -48,17 +48,15 @@ class TransientDetectorParameters:
     post_bias: float = 0.0
 
     def to_array(self, hyperparams: "ExperimentHyperparameters") -> jnp.ndarray:
-        arr = jnp.concatenate(
-            [
-                jnp.asarray(self.window_sizes, dtype=jnp.float32),
-                jnp.asarray(self.weights, dtype=jnp.float32),
-                jnp.asarray(self.f0s, dtype=jnp.float32),
-                jnp.asarray(self.qs, dtype=jnp.float32),
-                jnp.array(
-                    [self.bias, self.post_gain, self.post_bias], dtype=jnp.float32
-                ),
-            ]
-        )
+        arrs = [
+            jnp.asarray(self.window_sizes, dtype=jnp.float32),
+            jnp.asarray(self.weights, dtype=jnp.float32),
+        ]
+        if not hyperparams.disable_filters:
+            arrs.append(jnp.asarray(self.f0s, dtype=jnp.float32))
+            arrs.append(jnp.asarray(self.qs, dtype=jnp.float32))
+        arrs.append(jnp.array([self.bias, self.post_gain, self.post_bias], dtype=jnp.float32))
+        arr = jnp.concatenate(arrs)
         return arr
 
     @classmethod
@@ -67,13 +65,23 @@ class TransientDetectorParameters:
     ) -> Self:
         arr = jnp.asarray(arr)
         n = hyperparams.num_channels
-        window_sizes = arr[:n]
-        weights = arr[n : 2 * n]
-        f0s = arr[2 * n : 3 * n]
-        qs = arr[3 * n : 4 * n]
-        bias = arr[4 * n]  # type: ignore
-        post_gain = arr[4 * n + 1]  # type: ignore
-        post_bias = arr[4 * n + 2]  # type: ignore
+        idx = 0
+        window_sizes = arr[idx : idx + n]
+        idx += n
+        weights = arr[idx : idx + n]
+        idx += n
+        if not hyperparams.disable_filters:
+            f0s = arr[idx : idx + n]
+            idx += n
+            qs = arr[idx : idx + n]
+            idx += n
+        else:
+            # Use defaults if not present
+            f0s = jnp.ones(n, dtype=jnp.float32) * 1000.0
+            qs = jnp.ones(n, dtype=jnp.float32)
+        bias = arr[idx]
+        post_gain = arr[idx + 1]
+        post_bias = arr[idx + 2]
         return cls(
             window_sizes=window_sizes,
             weights=weights,

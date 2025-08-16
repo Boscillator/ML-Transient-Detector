@@ -28,10 +28,33 @@ class TransientExample:
     sample_rate: int  # Sample rate of the audio
 
 
-def load_transient_times(txt_path: str) -> list[float]:
-    """Load transient times (in seconds) from a label .txt file (first column only) using numpy."""
-    times = np.loadtxt(txt_path, usecols=0, comments="#", ndmin=1)
-    return times.tolist()
+
+def load_all_transient_times(label_tracks_path: str) -> dict:
+    """
+    Load all transient times from a single Label_Tracks.txt file.
+    Returns a dict mapping track name (without _Labels) to list of times.
+    """
+    transient_dict = {}
+    with open(label_tracks_path, 'r') as f:
+        for line in f:
+            parts = line.strip().split('\t')
+            if len(parts) < 2:
+                continue
+            track = parts[0]
+            # Remove quotes if present
+            if track.startswith('"') and track.endswith('"'):
+                track = track[1:-1]
+            # Remove trailing _Labels if present
+            if track.endswith('_Labels'):
+                track = track[:-7]
+            try:
+                time = float(parts[1])
+            except ValueError:
+                continue
+            if track not in transient_dict:
+                transient_dict[track] = []
+            transient_dict[track].append(time)
+    return transient_dict
 
 
 def load_wav_mono_normalized(filepath: str) -> tuple[np.ndarray, int]:
@@ -73,19 +96,24 @@ def generate_label_array(
     return label
 
 
+
 def load_transient_example(
     base_path: str,
     hyperparams: "ExperimentHyperparameters",
     window_s: Optional[float] = None,
+    transient_dict: Optional[dict] = None,
 ) -> TransientExample:
     """
-    Given a base file path (without extension), load the wav and txt, generate label array, and return a TransientExample.
-    Example: base_path='data/export/DarkIllusion_ElecGtr5DI' will load .wav and .txt
+    Given a base file path (without extension), load the wav and get transient times from dict, generate label array, and return a TransientExample.
+    Example: base_path='data/export/DarkIllusion_ElecGtr5DI' will load .wav and use transient_dict['DarkIllusion_ElecGtr5DI']
     """
     audio_path = base_path + ".wav"
-    label_path = base_path + "_Labels.txt"
+    # Extract track name from base_path (last part after /)
+    track_name = Path(base_path).name
+    if transient_dict is None:
+        raise ValueError("transient_dict must be provided")
+    transient_times = transient_dict.get(track_name, [])
     audio, sr = load_wav_mono_normalized(audio_path)
-    transient_times = load_transient_times(label_path)
     if window_s is None:
         window_s = hyperparams.window_s
     label_array = generate_label_array(
@@ -155,13 +183,15 @@ def chunkify_examples(
     return chunks
 
 
+
 def load_whole_dataset(
     path: Path, hyperparams: "ExperimentHyperparameters"
 ) -> List[TransientExample]:
     """
-    Scan a directory for .wav and _Labels.txt pairs, load each as a TransientExample using load_transient_example, and return a list of examples.
+    Scan a directory for .wav files, load each as a TransientExample using load_transient_example, and return a list of examples.
+    Only loads tracks that have corresponding labels.
     Args:
-        path: Path to the folder containing .wav and _Labels.txt files (e.g., Path('data/export'))
+        path: Path to the folder containing .wav files (e.g., Path('data/export'))
         hyperparams: ExperimentHyperparameters instance
     Returns:
         List[TransientExample]
@@ -169,19 +199,24 @@ def load_whole_dataset(
     examples = []
     path = Path(path)
     wav_files = sorted(path.glob("*.wav"))
+    # Load all transient times from the single label file
+    label_tracks_path = path / "Label_Tracks.txt"
+    transient_dict = load_all_transient_times(str(label_tracks_path))
+    
     for wav_file in wav_files:
+        track_name = wav_file.stem
+        # Only load if we have labels for this track
+        if track_name not in transient_dict:
+            logger.info(f"No labels found for {track_name}, skipping")
+            continue
+            
         base = wav_file.with_suffix("")
-        # Remove trailing extension, e.g. 'DarkIllusion_ElecGtr5DI'
         base_path = str(base)
-        label_path = base_path + "_Labels.txt"
-        if Path(label_path).exists():
-            try:
-                example = load_transient_example(base_path, hyperparams)
-                examples.append(example)
-            except Exception as e:
-                logger.warning(f"Failed to load {base_path}: {e}")
-        else:
-            logger.info(f"No label file for {base_path}, skipping.")
+        try:
+            example = load_transient_example(base_path, hyperparams, transient_dict=transient_dict)
+            examples.append(example)
+        except Exception as e:
+            logger.warning(f"Failed to load {base_path}: {e}")
 
     logger.info(f"Loaded {len(examples)} examples from {path}")
     return examples
@@ -193,8 +228,8 @@ def load_dataset(
     """
     Load the dataset from a directory, shuffle, and split into train and validation sets.
     Args:
-        path: Path to the folder containing .wav and _Labels.txt files (e.g., Path('data/export'))
-        hyperparms: ExperimentHyperparameters instancesdf lkjoij
+        path: Path to the folder containing .wav files (e.g., Path('data/export'))
+        hyperparms: ExperimentHyperparameters instance
         split: Fraction of data to use for training (default 0.5)
     Returns:
         train_set: List[TransientExample]
@@ -204,6 +239,11 @@ def load_dataset(
     if not examples:
         logger.warning(f"No examples found in {path}")
         return [], []
+
+    examples_chunked = []
+    for ex in examples:
+        examples_chunked.extend(chunkify_examples(ex, hyperparms))
+
     rng = random.Random(42)
     indices = list(range(len(examples)))
     rng.shuffle(indices)
@@ -216,4 +256,5 @@ def load_dataset(
         val_indices = indices[split_idx:]
         train_set = [examples[i] for i in train_indices]
         val_set = [examples[i] for i in val_indices]
+
     return train_set, val_set

@@ -30,22 +30,23 @@ def train_model(hyperparams: ExperimentHyperparameters, train_set, val_set) -> L
         f"Loaded {len(train_set)} training and {len(val_set)} validation examples from dataset."
     )
 
-    # Optionally chunkify all training and validation examples (if needed)
-    train_chunks = []
-    for ex in train_set:
-        train_chunks.extend(chunkify_examples(ex, hyperparams))
-    val_chunks = []
-    for ex in val_set:
-        val_chunks.extend(chunkify_examples(ex, hyperparams))
-    logger.info(f"Total chunks: {len(train_chunks)} train, {len(val_chunks)} val")
+    # plot_predictions(
+    #     train_set,
+    #     TransientDetectorParameters(),
+    #     output_dir="data/plots/chunk_preds_preoptimized",
+    #     is_training=True,
+    #     hyperparams=hyperparams,
+    #     do_debug=True,
+    #     prefix="",
+    #     print_prefix="Pre-optimized: ",
+    # )
 
     # Optimize parameters
     logger.info("Optimizing transient detector parameters on training set...")
-    opt_params = optimize_transient_detector(train_chunks, hyperparams)
+    opt_params = optimize_transient_detector(train_set, hyperparams)
     logger.info(f"Optimized parameters: {opt_params}")
 
     # Switch to CPU for evaluation (we run the IIR filters in evaluation, which are very slow on the GPU)
-    old_device = hyperparams.device
     hyperparams.device = "cpu"
     cpu = jax.devices("cpu")[0]
     opt_params_cpu = jax.tree_util.tree_map(
@@ -55,7 +56,7 @@ def train_model(hyperparams: ExperimentHyperparameters, train_set, val_set) -> L
 
     with jax.default_device(cpu):
         # Evaluate optimized model on validation set across thresholds
-        eval_results = evaluate_model(hyperparams, opt_params_cpu, val_chunks)
+        eval_results = evaluate_model(hyperparams, opt_params_cpu, val_set)
         # Print concise summary
         logger.info("Validation results by threshold:")
         for r in eval_results:
@@ -80,7 +81,7 @@ def train_model(hyperparams: ExperimentHyperparameters, train_set, val_set) -> L
 
         # Plot predictions after optimization (force CPU for IIR eval)
         plot_predictions(
-            val_chunks,
+            val_set,
             opt_params_cpu,
             output_dir="data/plots/chunk_preds_optimized",
             is_training=False,
@@ -104,8 +105,8 @@ def main():
 
     # Define grid
     sweep_space = {
-        "num_channels": [2, 3, 4, 5],
-        "disable_filters": [True, False],
+        "num_channels": [2],
+        "disable_filters": [True],
     }
 
     # Generate all combinations
