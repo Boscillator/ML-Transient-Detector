@@ -245,16 +245,16 @@ def load_dataset(
         examples_chunked.extend(chunkify_examples(ex, hyperparms))
 
     rng = random.Random(42)
-    indices = list(range(len(examples)))
+    indices = list(range(len(examples_chunked)))
     rng.shuffle(indices)
-    split_idx = int(len(examples) * split)
-    if len(examples) == 1:
+    split_idx = int(len(examples_chunked) * split)
+    if len(examples_chunked) == 1:
         logger.error("Only one example")
         raise ValueError("Not enough examples to split into train and validation sets.")
     else:
         train_indices = indices[:split_idx]
         val_indices = indices[split_idx:]
-        train_set = [examples[i] for i in train_indices]
-        val_set = [examples[i] for i in val_indices]
+        train_set = [examples_chunked[i] for i in train_indices]
+        val_set = [examples_chunked[i] for i in val_indices]
 
     return train_set, val_set

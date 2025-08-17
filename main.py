@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import jax
 import jax.numpy as jnp
+from dataclasses import replace
 
 from data import (
     load_dataset,
@@ -30,16 +31,16 @@ def train_model(hyperparams: ExperimentHyperparameters, train_set, val_set) -> L
         f"Loaded {len(train_set)} training and {len(val_set)} validation examples from dataset."
     )
 
-    # plot_predictions(
-    #     train_set,
-    #     TransientDetectorParameters(),
-    #     output_dir="data/plots/chunk_preds_preoptimized",
-    #     is_training=True,
-    #     hyperparams=hyperparams,
-    #     do_debug=True,
-    #     prefix="",
-    #     print_prefix="Pre-optimized: ",
-    # )
+    plot_predictions(
+        train_set,
+        TransientDetectorParameters(),
+        output_dir="data/plots/chunk_preds_preoptimized",
+        is_training=True,
+        hyperparams=hyperparams,
+        do_debug=True,
+        prefix="",
+        print_prefix="Pre-optimized: ",
+    )
 
     # Optimize parameters
     logger.info("Optimizing transient detector parameters on training set...")
@@ -47,7 +48,6 @@ def train_model(hyperparams: ExperimentHyperparameters, train_set, val_set) -> L
     logger.info(f"Optimized parameters: {opt_params}")
 
     # Switch to CPU for evaluation (we run the IIR filters in evaluation, which are very slow on the GPU)
-    hyperparams.device = "cpu"
     cpu = jax.devices("cpu")[0]
     opt_params_cpu = jax.tree_util.tree_map(
         lambda x: jax.device_put(x, cpu) if isinstance(x, jax.Array) else x,
@@ -103,7 +103,8 @@ def main():
 
     # Prepare data once
     base_hyperparams = ExperimentHyperparameters()
-    train_set, val_set = load_dataset(Path("data/export"), base_hyperparams, split=0.2)
+    train_set, val_set = load_dataset(Path("data/export"), base_hyperparams, split=0.5)
+    train_set = train_set[:5]
 
     logger.info(f"Loaded {len(train_set)} training and {len(val_set)} validation examples from dataset.")
 
@@ -115,9 +116,7 @@ def main():
 
     # Generate all combinations
     for num_channels, disable_filters in product(sweep_space["num_channels"], sweep_space["disable_filters"]):
-        h = deepcopy(base_hyperparams)
-        h.num_channels = num_channels
-        h.disable_filters = disable_filters
+        h = replace(base_hyperparams, num_channels=num_channels, disable_filters=disable_filters)
         run_name = f"{'nofilter' if disable_filters else 'filter'}_{num_channels}ch"
         logger.info(f"=== Running sweep: {run_name} ===")
 

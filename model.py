@@ -29,6 +29,7 @@ MAX_KERNEL_SIZE = int(round(MAX_WINDOW_SIZE * ASSUME_SAMPLE_RATE))
 MAX_KERNEL_SIZE = MAX_KERNEL_SIZE + (MAX_KERNEL_SIZE + 1) % 2
 
 
+@jax.tree_util.register_dataclass
 @dataclass
 class TransientDetectorParameters:
     window_sizes: jnp.ndarray = field(
@@ -94,7 +95,7 @@ class TransientDetectorParameters:
 
 
 @jax.tree_util.register_dataclass
-@dataclass
+@dataclass(frozen=True)
 class ExperimentHyperparameters:
     device: str = "gpu"  # or 'cpu'
     min_length_s: float = 5.0
@@ -110,9 +111,6 @@ class ExperimentHyperparameters:
     bias_bounds: tuple = (-10.0, 10.0)
     post_gain_bounds: tuple = (-10.0, 10.0)
     post_bias_bounds: tuple = (-1.0, 1.0)
-    detector_defaults: TransientDetectorParameters = field(
-        default_factory=TransientDetectorParameters
-    )
     use_differential_evolution: bool = True  # If True, run DE before L-BFGS-B
     disable_filters: bool = False  # If True, bypass all bandpass filtering
 
@@ -211,8 +209,7 @@ def compute_channel_output(
     env = moving_average(power, window_samples, is_training=is_training)
     return weight * env
 
-
-def compute_all_channels(
+def compute_all_channels_impl(
     audio: jnp.ndarray,
     window_sizes: jnp.ndarray,
     weights: jnp.ndarray,
@@ -242,8 +239,11 @@ def compute_all_channels(
 
     return jnp.stack([channel_fn(i) for i in range(n)], axis=0)
 
+# JIT compile the function
+compute_all_channels = jax.jit(compute_all_channels_impl, static_argnames=['sample_rate', 'is_training', 'hyperparams'])
 
-def transient_detector(
+
+def transient_detector_impl(
     params: TransientDetectorParameters,
     audio: jnp.ndarray,
     sample_rate: float,
@@ -265,29 +265,10 @@ def transient_detector(
     inner = params.bias + summed
     outer = params.post_gain * inner + params.post_bias
     result = jax.nn.sigmoid(outer)
-
-    if do_debug:
-        global _dbg_n
-        n = params.window_sizes.shape[0]
-        debug_data = {
-            "audio": audio,
-            "power": jnp.abs(audio),
-            **{
-                f"env_{i}": channel_outputs[i] / params.weights[i]
-                if params.weights[i] != 0
-                else channel_outputs[i]
-                for i in range(n)
-            },
-            **{f"weighted_env_{i}": channel_outputs[i] for i in range(n)},
-            "summed": summed,
-            "inner": inner,
-            "outer": outer,
-            "result": result,
-        }
-        internal_debug(_dbg_n, debug_data)
-        _dbg_n += 1
-
     return result
+
+# JIT compile the transient_detector function
+transient_detector = jax.jit(transient_detector_impl, static_argnames=['sample_rate', 'do_debug', 'is_training', 'hyperparams'])
 
 
 def loss_function(
@@ -351,7 +332,8 @@ def optimize_transient_detector(chunks, hyperparams: ExperimentHyperparameters):
         )
         total_loss = jnp.sum(losses)
         total_count = jnp.sum(counts)
-        return total_loss / jnp.maximum(1, total_count)
+        loss =  total_loss / jnp.maximum(1, total_count)
+        return loss
 
     # JAX grad for the loss function
     loss_grad = jax.grad(lambda p: loss_for_params(p))
@@ -380,12 +362,19 @@ def optimize_transient_detector(chunks, hyperparams: ExperimentHyperparameters):
     # Optionally run differential evolution first
     if hyperparams.use_differential_evolution:
         logger.info("Running differential evolution (global search)...")
+        # Wrap loss_for_params to ensure it only receives numpy arrays and is serializable
+        def scipy_loss_wrapper(param_array):
+            # Convert to numpy array if not already
+            param_array = np.asarray(param_array, dtype=np.float32)
+            return float(loss_for_params(param_array))
+
         de_result = scipy.optimize.differential_evolution(
-            func=loss_for_params,
+            func=scipy_loss_wrapper,
             bounds=bounds,
             maxiter=100,
             popsize=15,
             disp=True,
+            tol=1e-6,
             polish=False,
         )
         logger.info(
