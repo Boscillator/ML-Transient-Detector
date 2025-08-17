@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+MAX_WINDOW_SIZE = int(0.5 * 48000)
+
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
@@ -29,9 +31,11 @@ class Hyperparameters:
     chunk_length_sec: float = 1.0
     """Length of snippets used for training"""
 
-    label_width_sec: float = 0.04
+    label_width_sec: float = 0.01
     """Width of pulse generated, centered on a transient"""
 
+    num_channels: int = 2
+    """Number of channels to use in transient detector architecture"""
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
@@ -48,6 +52,17 @@ class Chunk:
     transient_times_sec: jnp.ndarray
     """Times of transients in seconds, relative to the start of the chunk"""
 
+@jax.tree_util.register_dataclass
+@dataclass
+class Params:
+    window_size_sec: jnp.ndarray
+    """Per-channel moving average window size"""
+
+    weights: jnp.ndarray
+    """Channel weights"""
+    
+    bias: float
+    """Channel sum bias"""
 
 def plot_chunk(
     hyperparameters: Hyperparameters,
@@ -56,6 +71,9 @@ def plot_chunk(
     chunk: Chunk,
     show_labels: bool = True,
     show_transients: bool = True,
+    predictions: Optional[jnp.ndarray] = None,
+    channel_outputs: Optional[jnp.ndarray] = None,
+    preactivation: Optional[jnp.ndarray] = None,
 ):
     """
     Plots a chunk, saves to `{plots_dir}/{folder}/{title}.png`. Shows wav data and optionally other data.
@@ -63,21 +81,37 @@ def plot_chunk(
 
     os.makedirs(hyperparameters.plots_dir / folder, exist_ok=True)
 
-    plt.figure(figsize=(12, 6))
-    plt.plot(chunk.audio, label="Audio")
+    if channel_outputs is not None:
+        fig, (ax_main, ax_channels) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    else:
+        fig, ax_main = plt.subplots(1, 1, figsize=(12, 6), sharex=True)
+
+    ax_main.plot(chunk.audio, label="Audio")
     if show_labels:
-        plt.plot(chunk.labels, label="Labels")
+        ax_main.plot(chunk.labels, label="Labels")
     if show_transients:
-        plt.vlines(
+        ax_main.vlines(
             chunk.transient_times_sec * chunk.sample_rate,
             -1,
             1,
             color="r",
+            linestyles='dotted',
             label="Transients",
         )
-    plt.title(title)
-    plt.legend()
-    plt.ylim([-1.1, 1.1])
+    if predictions is not None:
+        ax_main.plot(predictions, label="Predictions")
+    ax_main.set_title(title)
+    ax_main.legend()
+    ax_main.set_ylim((-1.1, 1.1))
+
+    if channel_outputs is not None:
+        for i in range(channel_outputs.shape[0]):
+            ax_channels.plot(channel_outputs[i], label=f"Channel {i}")
+        if preactivation is not None:
+            ax_channels.plot(preactivation, label="Pre-activation", linestyle='--', color='gray')
+        ax_channels.set_title("Channel Outputs")
+        ax_channels.legend()
+
     plt.savefig(hyperparameters.plots_dir / folder / f"{title}.png")
     plt.close()
 
@@ -155,16 +189,59 @@ def load_data(
             chunks.append(chunk)
     return chunks
 
+def moving_average(x: jnp.ndarray, window_size_s: float, sample_rate: int, max_kernel_size: int = MAX_WINDOW_SIZE) -> jnp.ndarray:
+    """
+    Differentiable causal moving average with a fixed-length kernel.
+    Kernel weights depend smoothly on window_size_s.
+    """
+    window_size_samples = window_size_s * sample_rate
+
+    # Create causal kernel: current sample + previous samples
+    idx = jnp.arange(max_kernel_size)
+    weights = jnp.where(idx < window_size_samples, 1.0, 0.0).astype(jnp.float32)
+    
+    # Use 'full' convolution then trim to get causal behavior
+    conv_result = jnp.convolve(x, weights, mode='full')
+    
+ 
+    return conv_result / jnp.maximum(jnp.sum(weights), 1e-8)
+
+def transient_detector(hyperparameters: Hyperparameters, params: Params, chunk: Chunk, is_training: bool = True, return_aux: bool = False):
+
+    def channel(window_size_s, weight) -> jnp.ndarray:
+        power = chunk.audio ** 2
+        avg = moving_average(power, window_size_s, chunk.sample_rate)
+        rms = jnp.sqrt(avg)
+        weighted_rms = weight * rms
+        return weighted_rms
+
+    channel_v = jax.vmap(channel)
+    channels = channel_v(params.window_size_sec, params.weights)
+
+    pre_activation = jnp.sum(channels, axis=0) + params.bias
+    result = jax.nn.sigmoid(pre_activation)
+    if not return_aux:
+        return result
+    else:
+        return result, {
+            "channel_outputs": channels,
+            "pre_activation": pre_activation
+        }
+
+transient_detector_j = jax.jit(transient_detector, static_argnames=("hyperparameters", "is_training", "return_aux"))
 
 def main():
     logging.basicConfig(level=logging.INFO)
     hyperparameters = Hyperparameters()
+    params = Params(window_size_sec=jnp.array([0.001, 0.01]), weights=jnp.array([100.0, -100.0]), bias=-10.0)
 
     # Clear out plots folder
     shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
 
     chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})
     for i, chunk in enumerate(chunks):
+        logger.info("Processing chunk %d", i)
+        predictions, aux = transient_detector_j(hyperparameters, params, chunk, is_training=True, return_aux=True)
         plot_chunk(
             hyperparameters,
             "chunks",
@@ -172,6 +249,9 @@ def main():
             chunk,
             show_labels=True,
             show_transients=True,
+            predictions=predictions,
+            channel_outputs=aux["channel_outputs"],
+            preactivation=aux["pre_activation"]
         )
 
 
