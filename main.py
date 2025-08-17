@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class Hyperparameters:
@@ -31,6 +32,7 @@ class Hyperparameters:
     label_width_sec: float = 0.04
     """Width of pulse generated, centered on a transient"""
 
+
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class Chunk:
@@ -47,7 +49,14 @@ class Chunk:
     """Times of transients in seconds, relative to the start of the chunk"""
 
 
-def plot_chunk(hyperparameters: Hyperparameters, folder: str, title: str, chunk: Chunk, show_labels: bool = True, show_transients: bool = True):
+def plot_chunk(
+    hyperparameters: Hyperparameters,
+    folder: str,
+    title: str,
+    chunk: Chunk,
+    show_labels: bool = True,
+    show_transients: bool = True,
+):
     """
     Plots a chunk, saves to `{plots_dir}/{folder}/{title}.png`. Shows wav data and optionally other data.
     """
@@ -59,14 +68,23 @@ def plot_chunk(hyperparameters: Hyperparameters, folder: str, title: str, chunk:
     if show_labels:
         plt.plot(chunk.labels, label="Labels")
     if show_transients:
-        plt.vlines(chunk.transient_times_sec * chunk.sample_rate, -1, 1, color="r", label="Transients")
+        plt.vlines(
+            chunk.transient_times_sec * chunk.sample_rate,
+            -1,
+            1,
+            color="r",
+            label="Transients",
+        )
     plt.title(title)
     plt.legend()
     plt.ylim([-1.1, 1.1])
     plt.savefig(hyperparameters.plots_dir / folder / f"{title}.png")
     plt.close()
 
-def load_data(hyperparameters: Hyperparameters, filter: Optional[Set[str]] = None) -> List[Chunk]:
+
+def load_data(
+    hyperparameters: Hyperparameters, filter: Optional[Set[str]] = None
+) -> List[Chunk]:
     """Loads audio data, breaks into chunks and generates transient signal"""
     label_file = hyperparameters.data_dir / "Label_Tracks.txt"
     # Read label file
@@ -76,7 +94,7 @@ def load_data(hyperparameters: Hyperparameters, filter: Optional[Set[str]] = Non
             parts = line.strip().split("\t")
             if len(parts) < 2:
                 continue
-            track_name = parts[0].replace('"', '').replace('_Labels', '')
+            track_name = parts[0].replace('"', "").replace("_Labels", "")
             transient_time = float(parts[1])
             labels_dict.setdefault(track_name, []).append(transient_time)
 
@@ -114,7 +132,9 @@ def load_data(hyperparameters: Hyperparameters, filter: Optional[Set[str]] = Non
             # Find transients in this chunk
             chunk_start_sec = start / sample_rate
             chunk_end_sec = end / sample_rate
-            transients_in_chunk = [t for t in transient_times if chunk_start_sec <= t < chunk_end_sec]
+            transients_in_chunk = [
+                t for t in transient_times if chunk_start_sec <= t < chunk_end_sec
+            ]
             # Make transients relative to chunk start
             transients_rel = [t - chunk_start_sec for t in transients_in_chunk]
             # Generate label signal
@@ -130,10 +150,11 @@ def load_data(hyperparameters: Hyperparameters, filter: Optional[Set[str]] = Non
                 audio=audio_chunk,
                 sample_rate=sample_rate,
                 labels=labels,
-                transient_times_sec=jnp.array(transients_rel, dtype=jnp.float32)
+                transient_times_sec=jnp.array(transients_rel, dtype=jnp.float32),
             )
             chunks.append(chunk)
     return chunks
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
@@ -144,7 +165,14 @@ def main():
 
     chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})
     for i, chunk in enumerate(chunks):
-        plot_chunk(hyperparameters, "chunks", f"chunk_{i}", chunk, show_labels=True, show_transients=True)
+        plot_chunk(
+            hyperparameters,
+            "chunks",
+            f"chunk_{i}",
+            chunk,
+            show_labels=True,
+            show_transients=True,
+        )
 
 
 if __name__ == "__main__":
