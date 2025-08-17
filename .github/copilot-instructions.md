@@ -1,0 +1,6 @@
+- This is a project to build a transient detector using a conventional architecture, but optimized via machine learning
+- Perfer JAX over numpy
+- JAX code used in the core model must be differentiable and jitable
+- For complex functions, test your code by importing just the function you need and running it
+- Use uv to manage the project
+- Imports go at the top of the file, not inside functions
