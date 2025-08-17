@@ -37,6 +37,7 @@ class Hyperparameters:
     num_channels: int = 2
     """Number of channels to use in transient detector architecture"""
 
+
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class Chunk:
@@ -52,6 +53,7 @@ class Chunk:
     transient_times_sec: jnp.ndarray
     """Times of transients in seconds, relative to the start of the chunk"""
 
+
 @jax.tree_util.register_dataclass
 @dataclass
 class Params:
@@ -60,9 +62,10 @@ class Params:
 
     weights: jnp.ndarray
     """Channel weights"""
-    
+
     bias: float
     """Channel sum bias"""
+
 
 def plot_chunk(
     hyperparameters: Hyperparameters,
@@ -95,7 +98,7 @@ def plot_chunk(
             -1,
             1,
             color="r",
-            linestyles='dotted',
+            linestyles="dotted",
             label="Transients",
         )
     if predictions is not None:
@@ -108,7 +111,9 @@ def plot_chunk(
         for i in range(channel_outputs.shape[0]):
             ax_channels.plot(channel_outputs[i], label=f"Channel {i}")
         if preactivation is not None:
-            ax_channels.plot(preactivation, label="Pre-activation", linestyle='--', color='gray')
+            ax_channels.plot(
+                preactivation, label="Pre-activation", linestyle="--", color="gray"
+            )
         ax_channels.set_title("Channel Outputs")
         ax_channels.legend()
 
@@ -189,7 +194,13 @@ def load_data(
             chunks.append(chunk)
     return chunks
 
-def moving_average(x: jnp.ndarray, window_size_s: float, sample_rate: int, max_kernel_size: int = MAX_WINDOW_SIZE) -> jnp.ndarray:
+
+def moving_average(
+    x: jnp.ndarray,
+    window_size_s: float,
+    sample_rate: int,
+    max_kernel_size: int = MAX_WINDOW_SIZE,
+) -> jnp.ndarray:
     """
     Differentiable causal moving average with a fixed-length kernel.
     Kernel weights depend smoothly on window_size_s.
@@ -199,17 +210,22 @@ def moving_average(x: jnp.ndarray, window_size_s: float, sample_rate: int, max_k
     # Create causal kernel: current sample + previous samples
     idx = jnp.arange(max_kernel_size)
     weights = jnp.where(idx < window_size_samples, 1.0, 0.0).astype(jnp.float32)
-    
+
     # Use 'full' convolution then trim to get causal behavior
-    conv_result = jnp.convolve(x, weights, mode='full')
-    
- 
+    conv_result = jnp.convolve(x, weights, mode="full")
+
     return conv_result / jnp.maximum(jnp.sum(weights), 1e-8)
 
-def transient_detector(hyperparameters: Hyperparameters, params: Params, chunk: Chunk, is_training: bool = True, return_aux: bool = False):
 
+def transient_detector(
+    hyperparameters: Hyperparameters,
+    params: Params,
+    chunk: Chunk,
+    is_training: bool = True,
+    return_aux: bool = False,
+):
     def channel(window_size_s, weight) -> jnp.ndarray:
-        power = chunk.audio ** 2
+        power = chunk.audio**2
         avg = moving_average(power, window_size_s, chunk.sample_rate)
         rms = jnp.sqrt(avg)
         weighted_rms = weight * rms
@@ -223,17 +239,22 @@ def transient_detector(hyperparameters: Hyperparameters, params: Params, chunk: 
     if not return_aux:
         return result
     else:
-        return result, {
-            "channel_outputs": channels,
-            "pre_activation": pre_activation
-        }
+        return result, {"channel_outputs": channels, "pre_activation": pre_activation}
 
-transient_detector_j = jax.jit(transient_detector, static_argnames=("hyperparameters", "is_training", "return_aux"))
+
+transient_detector_j = jax.jit(
+    transient_detector, static_argnames=("hyperparameters", "is_training", "return_aux")
+)
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
     hyperparameters = Hyperparameters()
-    params = Params(window_size_sec=jnp.array([0.001, 0.01]), weights=jnp.array([100.0, -100.0]), bias=-10.0)
+    params = Params(
+        window_size_sec=jnp.array([0.001, 0.01]),
+        weights=jnp.array([100.0, -100.0]),
+        bias=-10.0,
+    )
 
     # Clear out plots folder
     shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
@@ -241,7 +262,9 @@ def main():
     chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})
     for i, chunk in enumerate(chunks):
         logger.info("Processing chunk %d", i)
-        predictions, aux = transient_detector_j(hyperparameters, params, chunk, is_training=True, return_aux=True)
+        predictions, aux = transient_detector_j(
+            hyperparameters, params, chunk, is_training=True, return_aux=True
+        )
         plot_chunk(
             hyperparameters,
             "chunks",
@@ -251,7 +274,7 @@ def main():
             show_transients=True,
             predictions=predictions,
             channel_outputs=aux["channel_outputs"],
-            preactivation=aux["pre_activation"]
+            preactivation=aux["pre_activation"],
         )
 
 
