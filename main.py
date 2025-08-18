@@ -43,6 +43,7 @@ class Hyperparameters:
     """Number of chunks to include in the training dataset"""
 
 
+
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class Chunk:
