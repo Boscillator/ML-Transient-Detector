@@ -277,7 +277,7 @@ def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
                 optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean()
             )
         losses = jnp.array(losses)
-        return jnp.sum(losses) / len(batch)
+        return jnp.mean(losses)
 
     # SGD setup
     learning_rate = 1e-2
@@ -292,8 +292,8 @@ def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     opt_state = optimizer.init(params)
 
     # Training loop
-    batch_size = min(2, len(chunks))
-    num_steps = 100
+    batch_size = min(5, len(chunks))
+    num_steps = 1000
     for step in range(num_steps):
         # Simple batching
         batch_idx = np.random.choice(len(chunks), batch_size, replace=False)
@@ -302,6 +302,8 @@ def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         updates, opt_state = optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
         if step % 10 == 0:
+            print(params)
+            print(grads)
             print(f"Step {step}: loss={loss_val}")
 
     return params
@@ -320,9 +322,9 @@ def main():
     # shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
 
     # Load data
-    chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})[:1]
+    chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})
 
-    # params = train(hyperparameters, chunks)
+    params = train(hyperparameters, chunks)
 
     for i, chunk in enumerate(chunks):
         logger.info("Processing chunk %d", i)
