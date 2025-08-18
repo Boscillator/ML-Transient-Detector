@@ -201,7 +201,7 @@ def moving_average(
     window_size_s: float,
     sample_rate: int,
     max_kernel_size: int = MAX_WINDOW_SIZE,
-    is_training: bool = True
+    is_training: bool = True,
 ) -> jnp.ndarray:
     """
     Differentiable causal moving average with a fixed-length kernel.
@@ -209,15 +209,17 @@ def moving_average(
     """
     window_size_samples = window_size_s * sample_rate
 
-    idx = jnp.arange(-max_kernel_size//2, max_kernel_size//2 + 1)
+    idx = jnp.arange(-max_kernel_size // 2, max_kernel_size // 2)
     if is_training:
-        # Differentiable proxy for rectangular window: sigmoid step
-        # Center the window at idx=0 (current sample), window extends to window_size_samples
-        # Use a sharp sigmoid for a soft step
         sharpness = 1
-        weights = jnp.where(idx <= 0, jax.nn.sigmoid(sharpness * (idx + window_size_samples)), 0.0)
+        weights = jnp.where(
+            idx <= 0, jax.nn.sigmoid(sharpness * (idx + window_size_samples)), 0.0
+        )
+        weights = jnp.flip(weights + 1e-8)
     else:
-        weights = jnp.where((idx > -window_size_samples) & (idx <= 0), 1.0, 0.0).astype(jnp.float32)
+        weights = jnp.where((idx > -window_size_samples) & (idx <= 0), 1.0, 0.0).astype(
+            jnp.float32
+        )
 
     conv_result = jnp.convolve(x, weights, mode="same")
 
@@ -235,7 +237,9 @@ def transient_detector(
 ):
     def channel(window_size_s, weight) -> jnp.ndarray:
         power = chunk.audio**2
-        avg = moving_average(power, window_size_s, chunk.sample_rate, is_training=is_training)
+        avg = moving_average(
+            power, window_size_s, chunk.sample_rate, is_training=is_training
+        )
         rms = jnp.sqrt(avg)
         weighted_rms = weight * rms
         return weighted_rms
@@ -255,6 +259,47 @@ transient_detector_j = jax.jit(
     transient_detector, static_argnames=("hyperparameters", "is_training", "return_aux")
 )
 
+def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
+    import optax
+    # Flatten/unflatten Params for optax
+    num_channels = hyperparameters.num_channels
+
+    def loss(params, batch):
+        losses = []
+        for c in batch:
+            predictions = transient_detector_j(hyperparameters, params, c, is_training=True)
+            losses.append(optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean())
+        losses = jnp.array(losses)
+        return jnp.sum(losses) / len(batch)
+
+    # SGD setup
+    learning_rate = 1e-2
+    optimizer = optax.sgd(learning_rate)
+    # Initial params
+    params = Params(
+        window_size_sec=jnp.ones(num_channels) * 0.01,
+        weights=jnp.ones(num_channels),
+        bias=0.0,
+    )
+
+    opt_state = optimizer.init(params)
+
+    # Training loop
+    batch_size = min(2, len(chunks))
+    num_steps = 100
+    for step in range(num_steps):
+        # Simple batching
+        batch_idx = np.random.choice(len(chunks), batch_size, replace=False)
+        batch = [chunks[i] for i in batch_idx]
+        loss_val, grads = jax.value_and_grad(loss)(params, batch)
+        updates, opt_state = optimizer.update(grads, opt_state)
+        params = optax.apply_updates(params, updates)
+        if step % 10 == 0:
+            print(f"Step {step}: loss={loss_val}")
+
+    return params
+
+
 
 
 def main():
@@ -267,22 +312,12 @@ def main():
     )
 
     # Clear out plots folder
-    shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
+    # shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
 
     # Load data
     chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})[:1]
 
-    def loss(params):
-        losses = []
-        for c in chunks:
-            predictions = transient_detector_j(hyperparameters, params, c, is_training=True)
-            print(predictions.shape, c.labels.shape)
-            losses.append(optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean())
-        losses = jnp.array(losses)
-        return jnp.sum(losses) / len(chunks)
-
-    dloss_dparam = jax.jit(jax.value_and_grad(loss))
-    print(dloss_dparam(params))
+    # params = train(hyperparameters, chunks)
 
     for i, chunk in enumerate(chunks):
         logger.info("Processing chunk %d", i)
@@ -301,8 +336,12 @@ def main():
             preactivation=aux["pre_activation"],
         )
 
+    def oop(params):
+        return jnp.sum(transient_detector_j(hyperparameters, params, chunks[0]))
+
+    print(jax.value_and_grad(oop)(params))
+
 
 if __name__ == "__main__":
-    np.set_printoptions(threshold=np.inf, linewidth=200)
     jax.config.update("jax_debug_nans", True)
     main()
