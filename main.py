@@ -203,49 +203,37 @@ def load_data(
     return chunks
 
 
-def softmax_kernel(window_size: float) -> jnp.ndarray:
-    half = MAX_WINDOW_SIZE // 2
-    idxs = jnp.arange(-half, half + 1)
-    mask = idxs <= 0
-    causal_idxs = idxs * mask
-
-    # Causal softmax kernel: only current and past
-    # Set future weights to -inf so softmax is zero there
-    logits = -((causal_idxs / window_size) ** 2)
-    logits = jnp.where(mask, logits, -jnp.inf)
-    kernel = jax.nn.softmax(logits)
-    result = kernel / kernel.sum()
-    return result + 1e-8
-
-
-def rectangle_kernel(window_size: float) -> jnp.ndarray:
-    half = MAX_WINDOW_SIZE // 2
-    idxs = jnp.arange(-half, half + 1)
-
-    width = jnp.clip(window_size, 1.0, MAX_WINDOW_SIZE)
-    rect_mask = (idxs >= -width + 1) & (idxs <= 0)
-    kernel = rect_mask.astype(jnp.float32)
-    result = kernel / kernel.sum()
-    return result + 1e-8
-
-
 def moving_average(
     x: jnp.ndarray,
     window_size_s: float,
     sample_rate: int,
+    max_kernel_size: int = MAX_WINDOW_SIZE,
     is_training: bool = True,
 ) -> jnp.ndarray:
     """
-    Differentiable, fractional window moving average with a softmax or rectangle kernel.
+    Differentiable causal moving average with a fixed-length kernel.
+    Kernel weights depend smoothly on window_size_s.
     """
-    window_size = sample_rate * window_size_s
+    window_size_samples = window_size_s * sample_rate
+
+    idx = jnp.arange(-max_kernel_size // 2, max_kernel_size // 2)
     if is_training:
-        kernel = softmax_kernel(window_size)
+        sharpness = 1
+        weights = jnp.where(
+            idx <= 0, jax.nn.sigmoid(sharpness * (idx + window_size_samples)), 0.0
+        )
+        weights = jnp.flip(weights + 1e-8)
     else:
-        kernel = rectangle_kernel(window_size)
+        weights = jnp.where((idx > -window_size_samples) & (idx <= 0), 1.0, 0.0).astype(
+            jnp.float32
+        )
+        weights = jnp.flip(weights)
 
-    return jnp.convolve(x, kernel, mode="same")
+    conv_result = jnp.convolve(x, weights, mode="same")
 
+    divisor = jnp.maximum(jnp.sum(weights), 1e-8)
+    result = conv_result / divisor
+    return result
 
 def transient_detector(
     hyperparameters: Hyperparameters,
@@ -267,7 +255,9 @@ def transient_detector(
     channels = channel_v(params.window_size_sec, params.weights)
 
     pre_activation = jnp.sum(channels, axis=0) + params.bias
-    result = jax.nn.sigmoid(params.post_gain * jax.nn.sigmoid(pre_activation) + params.post_bias)
+    result = jax.nn.sigmoid(
+        params.post_gain * pre_activation + params.post_bias
+    )
     if not return_aux:
         return result
     else:
@@ -316,7 +306,9 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             predictions = transient_detector_j(
                 hyperparameters, params, c, is_training=True
             )
-            this_loss = optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean()
+            this_loss = optax.losses.sigmoid_binary_cross_entropy(
+                predictions, c.labels
+            ).mean()
             losses.append(this_loss)
         losses = jnp.array(losses)
         return jnp.sum(losses) / len(chunks)
@@ -338,11 +330,11 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     x0 = params_to_flat(init_params)
 
     bounds = (
-        [(0.0001, 0.5)] * num_channels +  # window_size_sec
-        [(-200, 200)] * num_channels +    # weights
-        [(-20, 20)] +                    # bias
-        [(0.0, 100.0)] +                 # post_gain (reasonable range for gain)
-        [(-20, 20)]                      # post_bias
+        [(0.0001, 0.5)] * num_channels  # window_size_sec
+        + [(-200, 200)] * num_channels  # weights
+        + [(-20, 20)]  # bias
+        + [(0.0, 100.0)]  # post_gain (reasonable range for gain)
+        + [(-20, 20)]  # post_bias
     )
 
     minimizer_kwargs = {
@@ -416,8 +408,8 @@ def main():
     params = Params(
         window_size_sec=jnp.array([0.001, 0.01]),
         weights=jnp.array([10.0, -10.0]),
-        bias=0.0,
-        post_gain=10.0,
+        bias=-10,
+        post_gain=10,
         post_bias=0.0,
     )
 
