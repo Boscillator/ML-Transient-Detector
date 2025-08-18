@@ -40,6 +40,7 @@ class Hyperparameters:
     """Number of channels to use in transient detector architecture"""
 
     train_dataset_size: int = 20
+    """Number of chunks to include in the training dataset"""
 
 
 @jax.tree_util.register_dataclass
@@ -235,6 +236,7 @@ def moving_average(
     result = conv_result / divisor
     return result
 
+
 def transient_detector(
     hyperparameters: Hyperparameters,
     params: Params,
@@ -255,9 +257,7 @@ def transient_detector(
     channels = channel_v(params.window_size_sec, params.weights)
 
     pre_activation = jnp.sum(channels, axis=0) + params.bias
-    result = jax.nn.sigmoid(
-        params.post_gain * pre_activation + params.post_bias
-    )
+    result = jax.nn.sigmoid(params.post_gain * pre_activation + params.post_bias)
     if not return_aux:
         return result
     else:
