@@ -284,9 +284,10 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             predictions = transient_detector_j(
                 hyperparameters, params, c, is_training=True
             )
-            losses.append(
-                optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean()
-            )
+            # jax.debug.print("Predictions: {predictions}", predictions=predictions)
+            this_loss = optax.losses.sigmoid_focal_loss(predictions, c.labels).mean()
+            # jax.debug.print("Loss: {this_loss}", this_loss=this_loss)
+            losses.append(this_loss)
         losses = jnp.array(losses)
         return jnp.sum(losses) / len(chunks)
 
@@ -298,25 +299,29 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
 
     # Initial guess
     init_params = Params(
-        window_size_sec=jnp.ones(num_channels) * 0.01,
-        weights=jnp.ones(num_channels),
-        bias=0.0,
+        window_size_sec=jnp.array([0.001, 0.01]),
+        weights=jnp.array([100.0, -100.0]),
+        bias=-10.0,
     )
     x0 = params_to_flat(init_params)
 
-    # Bounds: window_size_sec [0.0001, 0.1], weights [-100, 100], bias [-20, 20]
-    bounds = [(0.0001, 0.1)] * num_channels + [(-100, 100)] * num_channels + [(-20, 20)]
+    bounds = [(0.0001, 0.1)] * num_channels + [(-200, 200)] * num_channels + [(-20, 20)]
 
-    result = scipy.optimize.minimize(
+    minimizer_kwargs = {
+        "method": "L-BFGS-B",
+        "jac": True,
+        "bounds": bounds,
+        "options": {"maxiter": 100, "disp": True}
+    }
+    result = scipy.optimize.basinhopping(
         scipy_loss_and_grad,
         x0,
-        method="L-BFGS-B",
-        jac=True,
-        bounds=bounds,
-        options={"maxiter": 100, "disp": True}
+        minimizer_kwargs=minimizer_kwargs,
+        niter=10,
+        disp=True
     )
     best_params = flat_to_params(result.x)
-    logger.info("Optimization result: %s", result)
+    logger.info("Basinhopping optimization result: %s", result)
     return best_params
 
 
@@ -378,13 +383,32 @@ def main():
     )
 
     # Clear out plots folder
-    # shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
+    shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
 
     # Load data
-    chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})[:5]
+    chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})[:20]
 
+
+    # Display pre-optimized solution
+    for i, chunk in enumerate(chunks):
+        logger.info("Processing chunk %d", i)
+        predictions, aux = transient_detector_j(
+            hyperparameters, params, chunk, is_training=True, return_aux=True
+        )
+        plot_chunk(
+            hyperparameters,
+            "pre_optimized",
+            f"chunk_{i}",
+            chunk,
+            show_labels=True,
+            show_transients=True,
+            predictions=predictions,
+        )
+
+    # Optimize
     params = optimize(hyperparameters, chunks)
 
+    # Display post-optimized solution
     for i, chunk in enumerate(chunks):
         logger.info("Processing chunk %d", i)
         predictions, aux = transient_detector_j(
