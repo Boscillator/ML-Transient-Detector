@@ -43,8 +43,11 @@ class Hyperparameters:
     train_dataset_size: int = 20
     """Number of chunks to include in the training dataset"""
 
-    enable_filters: bool = True
+    enable_filters: bool = False
     """Whether to apply a bandpass filter to the beginning of each channel"""
+
+    prenormalize_audio: bool = True
+    """Normalize all audio clips so their peak is at 0 dBFS"""
 
 
 @jax.tree_util.register_dataclass
@@ -73,16 +76,19 @@ class Params:
     """Channel weights"""
 
     filter_f0s: jnp.ndarray
+    """Per channel bandpass filter center frequency"""
 
     filter_qs: jnp.ndarray
+    """Per channel bandpass filter q"""
 
     bias: float
     """Channel sum bias"""
 
     post_gain: float
+    """Multiplier for channel sum. Should be included in channel weights, but adding this really helps training."""
 
     post_bias: float
-
+    """Bias for channel sum"""
 
 
 def plot_chunk(
@@ -271,7 +277,9 @@ def transient_detector(
         return weighted_rms
 
     channel_v = jax.vmap(channel)
-    channels = channel_v(params.window_size_sec, params.weights, params.filter_f0s, params.filter_qs)
+    channels = channel_v(
+        params.window_size_sec, params.weights, params.filter_f0s, params.filter_qs
+    )
 
     pre_activation = jnp.sum(channels, axis=0) + params.bias
     result = jax.nn.sigmoid(params.post_gain * pre_activation + params.post_bias)
@@ -344,10 +352,10 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
 
     # Initial guess
     init_params = Params(
-        window_size_sec=jnp.array([0.001, 0.01]),
-        weights=jnp.array([10.0, -10.0]),
-        filter_f0s=jnp.array([200.0, 2000.0]),
-        filter_qs=jnp.array([1.0, 1.0]),
+        window_size_sec=jnp.array([0.01] * num_channels),
+        weights=jnp.array([10.0] * num_channels) * jnp.where(jnp.arange(num_channels) % 2 == 0, 1, -1), # Alternating sign helps optimizer
+        filter_f0s=jnp.array([2000.0] * num_channels),
+        filter_qs=jnp.array([1.0] * num_channels),
         bias=0.0,
         post_gain=10.0,
         post_bias=0.0,
@@ -431,6 +439,8 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
 
 def main():
     logging.basicConfig(level=logging.INFO)
+    random.seed(42)
+
     hyperparameters = Hyperparameters()
     params = Params(
         window_size_sec=jnp.array([0.001, 0.01]),
@@ -475,7 +485,7 @@ def main():
     for i, chunk in enumerate(chunks):
         logger.info("Processing chunk %d", i)
         predictions, aux = transient_detector_j(
-            hyperparameters, params, chunk, is_training=True, return_aux=True
+            hyperparameters, params, chunk, is_training=False, return_aux=True
         )
         plot_chunk(
             hyperparameters,
