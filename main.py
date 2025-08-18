@@ -260,6 +260,65 @@ transient_detector_j = jax.jit(
     transient_detector, static_argnames=("hyperparameters", "is_training", "return_aux")
 )
 
+def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
+    import scipy.optimize
+    num_channels = hyperparameters.num_channels
+
+    def params_to_flat(params):
+        return jnp.concatenate([
+            jnp.array(params.window_size_sec),
+            jnp.array(params.weights),
+            jnp.array([params.bias])
+        ])
+
+    def flat_to_params(flat):
+        window_size_sec = jnp.array(flat[:num_channels])
+        weights = jnp.array(flat[num_channels:2*num_channels])
+        bias = jnp.array(flat[-1])
+        return Params(window_size_sec=window_size_sec, weights=weights, bias=bias) # type: ignore
+
+    def loss(flat_params):
+        params = flat_to_params(flat_params)
+        losses = []
+        for c in chunks:
+            predictions = transient_detector_j(
+                hyperparameters, params, c, is_training=True
+            )
+            losses.append(
+                optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean()
+            )
+        losses = jnp.array(losses)
+        return jnp.sum(losses) / len(chunks)
+
+    loss_and_grad = jax.value_and_grad(loss)
+
+    def scipy_loss_and_grad(flat_params):
+        val, grad = loss_and_grad(flat_params)
+        return float(val), np.array(grad, dtype=np.float64)
+
+    # Initial guess
+    init_params = Params(
+        window_size_sec=jnp.ones(num_channels) * 0.01,
+        weights=jnp.ones(num_channels),
+        bias=0.0,
+    )
+    x0 = params_to_flat(init_params)
+
+    # Bounds: window_size_sec [0.0001, 0.1], weights [-100, 100], bias [-20, 20]
+    bounds = [(0.0001, 0.1)] * num_channels + [(-100, 100)] * num_channels + [(-20, 20)]
+
+    result = scipy.optimize.minimize(
+        scipy_loss_and_grad,
+        x0,
+        method="L-BFGS-B",
+        jac=True,
+        bounds=bounds,
+        options={"maxiter": 100, "disp": True}
+    )
+    best_params = flat_to_params(result.x)
+    logger.info("Optimization result: %s", result)
+    return best_params
+
 
 def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     import optax
@@ -322,9 +381,9 @@ def main():
     # shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
 
     # Load data
-    chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})
+    chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})[:5]
 
-    params = train(hyperparameters, chunks)
+    params = optimize(hyperparameters, chunks)
 
     for i, chunk in enumerate(chunks):
         logger.info("Processing chunk %d", i)
