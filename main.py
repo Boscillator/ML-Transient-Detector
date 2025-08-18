@@ -7,6 +7,7 @@ import numpy as np
 import os
 import logging
 import optax
+import random
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -38,6 +39,8 @@ class Hyperparameters:
     num_channels: int = 2
     """Number of channels to use in transient detector architecture"""
 
+    train_dataset_size: int = 40
+
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
@@ -53,6 +56,7 @@ class Chunk:
 
     transient_times_sec: jnp.ndarray
     """Times of transients in seconds, relative to the start of the chunk"""
+
 
 
 @jax.tree_util.register_dataclass
@@ -260,22 +264,26 @@ transient_detector_j = jax.jit(
     transient_detector, static_argnames=("hyperparameters", "is_training", "return_aux")
 )
 
+
 def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     import scipy.optimize
+
     num_channels = hyperparameters.num_channels
 
     def params_to_flat(params):
-        return jnp.concatenate([
-            jnp.array(params.window_size_sec),
-            jnp.array(params.weights),
-            jnp.array([params.bias])
-        ])
+        return jnp.concatenate(
+            [
+                jnp.array(params.window_size_sec),
+                jnp.array(params.weights),
+                jnp.array([params.bias]),
+            ]
+        )
 
     def flat_to_params(flat):
         window_size_sec = jnp.array(flat[:num_channels])
-        weights = jnp.array(flat[num_channels:2*num_channels])
+        weights = jnp.array(flat[num_channels : 2 * num_channels])
         bias = jnp.array(flat[-1])
-        return Params(window_size_sec=window_size_sec, weights=weights, bias=bias) # type: ignore
+        return Params(window_size_sec=window_size_sec, weights=weights, bias=bias)  # type: ignore
 
     def loss(flat_params):
         params = flat_to_params(flat_params)
@@ -311,14 +319,11 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         "method": "L-BFGS-B",
         "jac": True,
         "bounds": bounds,
-        "options": {"maxiter": 100, "disp": True}
+        "options": {"maxiter": 100, "disp": True},
     }
+    logger.info("Starting optimization with initial params: %s", init_params)
     result = scipy.optimize.basinhopping(
-        scipy_loss_and_grad,
-        x0,
-        minimizer_kwargs=minimizer_kwargs,
-        niter=10,
-        disp=True
+        scipy_loss_and_grad, x0, minimizer_kwargs=minimizer_kwargs, niter=10, disp=True
     )
     best_params = flat_to_params(result.x)
     logger.info("Basinhopping optimization result: %s", result)
@@ -344,20 +349,20 @@ def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         return jnp.mean(losses)
 
     # SGD setup
-    learning_rate = 1e-2
+    learning_rate = 1e-3
     optimizer = optax.sgd(learning_rate)
     # Initial params
     params = Params(
-        window_size_sec=jnp.ones(num_channels) * 0.01,
-        weights=jnp.ones(num_channels),
-        bias=0.0,
+        window_size_sec=jnp.array([0.001, 0.01]),
+        weights=jnp.array([100.0, -100.0]),
+        bias=-10.0,
     )
 
     opt_state = optimizer.init(params)
 
     # Training loop
     batch_size = min(5, len(chunks))
-    num_steps = 1000
+    num_steps = 400
     for step in range(num_steps):
         # Simple batching
         batch_idx = np.random.choice(len(chunks), batch_size, replace=False)
@@ -386,11 +391,11 @@ def main():
     shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
 
     # Load data
-    chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})[:20]
-
+    chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick", "DarkIllusion_ElecGtr5DI"})
+    chunks = random.sample(chunks, hyperparameters.train_dataset_size)
 
     # Display pre-optimized solution
-    for i, chunk in enumerate(chunks):
+    for i, chunk in enumerate(chunks[:10]):
         logger.info("Processing chunk %d", i)
         predictions, aux = transient_detector_j(
             hyperparameters, params, chunk, is_training=True, return_aux=True
