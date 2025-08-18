@@ -9,7 +9,7 @@ from filters import design_biquad_bandpass, biquad_apply, apply_fir_filter
 
 # Settings for grid
 f0s = jnp.array([500.0, 1000.0, 5000.0, 10_000.0])  # Hz
-qs = jnp.array([0.1, 0.5, 1.0, 1.5, 2.0])
+qs = jnp.array([0.1, 0.5, 1.0, 1.5, 2.0, 2.5, 5.0])
 sample_rate = 48000
 N = 4096  # FFT size
 impulse = jnp.zeros(N)

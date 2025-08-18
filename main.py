@@ -11,6 +11,7 @@ import random
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
+from filters import design_biquad_bandpass, biquad_apply, apply_fir_filter
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,8 @@ class Hyperparameters:
     train_dataset_size: int = 20
     """Number of chunks to include in the training dataset"""
 
+    enable_filters: bool = True
+    """Whether to apply a bandpass filter to the beginning of each channel"""
 
 
 @jax.tree_util.register_dataclass
@@ -69,12 +72,17 @@ class Params:
     weights: jnp.ndarray
     """Channel weights"""
 
+    filter_f0s: jnp.ndarray
+
+    filter_qs: jnp.ndarray
+
     bias: float
     """Channel sum bias"""
 
     post_gain: float
 
     post_bias: float
+
 
 
 def plot_chunk(
@@ -245,8 +253,16 @@ def transient_detector(
     is_training: bool = True,
     return_aux: bool = False,
 ):
-    def channel(window_size_s, weight) -> jnp.ndarray:
-        power = chunk.audio**2
+    def channel(window_size_s, weight, f0, q) -> jnp.ndarray:
+        if hyperparameters.enable_filters:
+            b, a = design_biquad_bandpass(f0, q, chunk.sample_rate)
+            if is_training:
+                filtered = apply_fir_filter(chunk.audio, b, a)
+            else:
+                filtered = biquad_apply(chunk.audio, b, a)
+        else:
+            filtered = chunk.audio
+        power = filtered**2
         avg = moving_average(
             power, window_size_s, chunk.sample_rate, is_training=is_training
         )
@@ -255,7 +271,7 @@ def transient_detector(
         return weighted_rms
 
     channel_v = jax.vmap(channel)
-    channels = channel_v(params.window_size_sec, params.weights)
+    channels = channel_v(params.window_size_sec, params.weights, params.filter_f0s, params.filter_qs)
 
     pre_activation = jnp.sum(channels, axis=0) + params.bias
     result = jax.nn.sigmoid(params.post_gain * pre_activation + params.post_bias)
@@ -280,6 +296,8 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             [
                 jnp.array(params.window_size_sec),
                 jnp.array(params.weights),
+                jnp.array(params.filter_f0s),
+                jnp.array(params.filter_qs),
                 jnp.array([params.bias]),
                 jnp.array([params.post_gain]),
                 jnp.array([params.post_bias]),
@@ -289,12 +307,16 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     def flat_to_params(flat):
         window_size_sec = jnp.array(flat[:num_channels])
         weights = jnp.array(flat[num_channels : 2 * num_channels])
-        bias = flat[2 * num_channels]
-        post_gain = flat[2 * num_channels + 1]
-        post_bias = flat[2 * num_channels + 2]
+        filter_f0s = jnp.array(flat[2 * num_channels : 3 * num_channels])
+        filter_qs = jnp.array(flat[3 * num_channels : 4 * num_channels])
+        bias = flat[4 * num_channels]
+        post_gain = flat[4 * num_channels + 1]
+        post_bias = flat[4 * num_channels + 2]
         return Params(
             window_size_sec=window_size_sec,
             weights=weights,
+            filter_f0s=filter_f0s,
+            filter_qs=filter_qs,
             bias=bias,
             post_gain=post_gain,
             post_bias=post_bias,
@@ -324,6 +346,8 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     init_params = Params(
         window_size_sec=jnp.array([0.001, 0.01]),
         weights=jnp.array([10.0, -10.0]),
+        filter_f0s=jnp.array([200.0, 2000.0]),
+        filter_qs=jnp.array([1.0, 1.0]),
         bias=0.0,
         post_gain=10.0,
         post_bias=0.0,
@@ -333,8 +357,10 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     bounds = (
         [(0.0001, 0.5)] * num_channels  # window_size_sec
         + [(-200, 200)] * num_channels  # weights
+        + [(20.0, 20000.0)] * num_channels  # filter_f0s (audio band)
+        + [(0.1, 5.0)] * num_channels  # filter_qs (typical Q range)
         + [(-20, 20)]  # bias
-        + [(0.0, 100.0)]  # post_gain (reasonable range for gain)
+        + [(0.0, 100.0)]  # post_gain
         + [(-20, 20)]  # post_bias
     )
 
@@ -353,54 +379,54 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     return best_params
 
 
-def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
-    import optax
+# def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
+#     import optax
 
-    # Flatten/unflatten Params for optax
-    num_channels = hyperparameters.num_channels
+#     # Flatten/unflatten Params for optax
+#     num_channels = hyperparameters.num_channels
 
-    def loss(params, batch):
-        losses = []
-        for c in batch:
-            predictions = transient_detector_j(
-                hyperparameters, params, c, is_training=True
-            )
-            losses.append(
-                optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean()
-            )
-        losses = jnp.array(losses)
-        return jnp.mean(losses)
+#     def loss(params, batch):
+#         losses = []
+#         for c in batch:
+#             predictions = transient_detector_j(
+#                 hyperparameters, params, c, is_training=True
+#             )
+#             losses.append(
+#                 optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean()
+#             )
+#         losses = jnp.array(losses)
+#         return jnp.mean(losses)
 
-    # SGD setup
-    learning_rate = 1e-3
-    optimizer = optax.sgd(learning_rate)
-    # Initial params
-    params = Params(
-        window_size_sec=jnp.array([0.001, 0.01]),
-        weights=jnp.array([100.0, -100.0]),
-        bias=-10.0,
-        post_gain=10.0,
-        post_bias=0.0,
-    )
+#     # SGD setup
+#     learning_rate = 1e-3
+#     optimizer = optax.sgd(learning_rate)
+#     # Initial params
+#     params = Params(
+#         window_size_sec=jnp.array([0.001, 0.01]),
+#         weights=jnp.array([100.0, -100.0]),
+#         bias=-10.0,
+#         post_gain=10.0,
+#         post_bias=0.0,
+#     )
 
-    opt_state = optimizer.init(params)
+#     opt_state = optimizer.init(params)
 
-    # Training loop
-    batch_size = min(5, len(chunks))
-    num_steps = 400
-    for step in range(num_steps):
-        # Simple batching
-        batch_idx = np.random.choice(len(chunks), batch_size, replace=False)
-        batch = [chunks[i] for i in batch_idx]
-        loss_val, grads = jax.value_and_grad(loss)(params, batch)
-        updates, opt_state = optimizer.update(grads, opt_state)
-        params = optax.apply_updates(params, updates)
-        if step % 10 == 0:
-            print(params)
-            print(grads)
-            print(f"Step {step}: loss={loss_val}")
+#     # Training loop
+#     batch_size = min(5, len(chunks))
+#     num_steps = 400
+#     for step in range(num_steps):
+#         # Simple batching
+#         batch_idx = np.random.choice(len(chunks), batch_size, replace=False)
+#         batch = [chunks[i] for i in batch_idx]
+#         loss_val, grads = jax.value_and_grad(loss)(params, batch)
+#         updates, opt_state = optimizer.update(grads, opt_state)
+#         params = optax.apply_updates(params, updates)
+#         if step % 10 == 0:
+#             print(params)
+#             print(grads)
+#             print(f"Step {step}: loss={loss_val}")
 
-    return params
+#     return params
 
 
 def main():
@@ -409,6 +435,8 @@ def main():
     params = Params(
         window_size_sec=jnp.array([0.001, 0.01]),
         weights=jnp.array([10.0, -10.0]),
+        filter_f0s=jnp.array([200.0, 2000.0]),
+        filter_qs=jnp.array([1.0, 1.0]),
         bias=-10,
         post_gain=10,
         post_bias=0.0,

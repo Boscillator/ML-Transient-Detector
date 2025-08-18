@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 import jax.lax as lax
 
+
 def design_biquad_bandpass(f0_hz, q, fs) -> tuple[jnp.ndarray, jnp.ndarray]:
     """
     Differentiable RBJ-style bandpass (constant skirt gain, peak gain = Q) biquad.
@@ -33,7 +34,7 @@ def design_biquad_bandpass(f0_hz, q, fs) -> tuple[jnp.ndarray, jnp.ndarray]:
     b1 = 0
     b2 = -alpha
     a0 = 1 + alpha
-    a1 = -2  * jnp.cos(w0)
+    a1 = -2 * jnp.cos(w0)
     a2 = 1 - alpha
     b = jnp.array([b0 / a0, b1 / a0, b2 / a0], dtype=jnp.float32)
     a = jnp.array([1.0, a1 / a0, a2 / a0], dtype=jnp.float32)
