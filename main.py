@@ -6,13 +6,14 @@ import scipy.io.wavfile as wavfile
 import numpy as np
 import os
 import logging
+import optax
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-MAX_WINDOW_SIZE = int(0.5 * 48000)
+MAX_WINDOW_SIZE = int(0.1 * 48000)
 
 
 @jax.tree_util.register_dataclass
@@ -200,6 +201,7 @@ def moving_average(
     window_size_s: float,
     sample_rate: int,
     max_kernel_size: int = MAX_WINDOW_SIZE,
+    is_training: bool = True
 ) -> jnp.ndarray:
     """
     Differentiable causal moving average with a fixed-length kernel.
@@ -207,14 +209,21 @@ def moving_average(
     """
     window_size_samples = window_size_s * sample_rate
 
-    # Create causal kernel: current sample + previous samples
-    idx = jnp.arange(max_kernel_size)
-    weights = jnp.where(idx < window_size_samples, 1.0, 0.0).astype(jnp.float32)
+    idx = jnp.arange(-max_kernel_size//2, max_kernel_size//2 + 1)
+    if is_training:
+        # Differentiable proxy for rectangular window: sigmoid step
+        # Center the window at idx=0 (current sample), window extends to window_size_samples
+        # Use a sharp sigmoid for a soft step
+        sharpness = 1
+        weights = jnp.where(idx <= 0, jax.nn.sigmoid(sharpness * (idx + window_size_samples)), 0.0)
+    else:
+        weights = jnp.where((idx > -window_size_samples) & (idx <= 0), 1.0, 0.0).astype(jnp.float32)
 
-    # Use 'full' convolution then trim to get causal behavior
-    conv_result = jnp.convolve(x, weights, mode="full")
+    conv_result = jnp.convolve(x, weights, mode="same")
 
-    return conv_result / jnp.maximum(jnp.sum(weights), 1e-8)
+    divisor = jnp.maximum(jnp.sum(weights), 1e-8)
+    result = conv_result / divisor
+    return result
 
 
 def transient_detector(
@@ -226,7 +235,7 @@ def transient_detector(
 ):
     def channel(window_size_s, weight) -> jnp.ndarray:
         power = chunk.audio**2
-        avg = moving_average(power, window_size_s, chunk.sample_rate)
+        avg = moving_average(power, window_size_s, chunk.sample_rate, is_training=is_training)
         rms = jnp.sqrt(avg)
         weighted_rms = weight * rms
         return weighted_rms
@@ -247,6 +256,7 @@ transient_detector_j = jax.jit(
 )
 
 
+
 def main():
     logging.basicConfig(level=logging.INFO)
     hyperparameters = Hyperparameters()
@@ -259,7 +269,21 @@ def main():
     # Clear out plots folder
     shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
 
-    chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})
+    # Load data
+    chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick"})[:1]
+
+    def loss(params):
+        losses = []
+        for c in chunks:
+            predictions = transient_detector_j(hyperparameters, params, c, is_training=True)
+            print(predictions.shape, c.labels.shape)
+            losses.append(optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean())
+        losses = jnp.array(losses)
+        return jnp.sum(losses) / len(chunks)
+
+    dloss_dparam = jax.jit(jax.value_and_grad(loss))
+    print(dloss_dparam(params))
+
     for i, chunk in enumerate(chunks):
         logger.info("Processing chunk %d", i)
         predictions, aux = transient_detector_j(
@@ -279,4 +303,6 @@ def main():
 
 
 if __name__ == "__main__":
+    np.set_printoptions(threshold=np.inf, linewidth=200)
+    jax.config.update("jax_debug_nans", True)
     main()
