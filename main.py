@@ -220,6 +220,7 @@ def moving_average(
         weights = jnp.where((idx > -window_size_samples) & (idx <= 0), 1.0, 0.0).astype(
             jnp.float32
         )
+        weights = jnp.flip(weights)
 
     conv_result = jnp.convolve(x, weights, mode="same")
 
@@ -259,16 +260,22 @@ transient_detector_j = jax.jit(
     transient_detector, static_argnames=("hyperparameters", "is_training", "return_aux")
 )
 
+
 def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     import optax
+
     # Flatten/unflatten Params for optax
     num_channels = hyperparameters.num_channels
 
     def loss(params, batch):
         losses = []
         for c in batch:
-            predictions = transient_detector_j(hyperparameters, params, c, is_training=True)
-            losses.append(optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean())
+            predictions = transient_detector_j(
+                hyperparameters, params, c, is_training=True
+            )
+            losses.append(
+                optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean()
+            )
         losses = jnp.array(losses)
         return jnp.sum(losses) / len(batch)
 
@@ -298,8 +305,6 @@ def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             print(f"Step {step}: loss={loss_val}")
 
     return params
-
-
 
 
 def main():
@@ -337,7 +342,9 @@ def main():
         )
 
     def oop(params):
-        return jnp.sum(transient_detector_j(hyperparameters, params, chunks[0]))
+        return jnp.sum(
+            transient_detector_j(hyperparameters, params, chunks[0], is_training=False)
+        )
 
     print(jax.value_and_grad(oop)(params))
 

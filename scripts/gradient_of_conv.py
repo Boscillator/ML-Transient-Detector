@@ -5,7 +5,12 @@ import numpy as np
 from typing import Literal
 from scipy.io import wavfile
 
-def grad_and_conv(audio: jnp.ndarray, mode: Literal["valid", "same", "full"], place: Literal["start", "middle", "end"]):
+
+def grad_and_conv(
+    audio: jnp.ndarray,
+    mode: Literal["valid", "same", "full"],
+    place: Literal["start", "middle", "end"],
+):
     kernel_size = 4096
 
     def do_it(gain):
@@ -36,5 +41,5 @@ else:
 
 for place in ["start", "middle", "end"]:
     for mode in ["valid", "same", "full"]:
-        v,g = grad_and_conv(audio, mode=mode, place=place)
-        print(place, mode, v,g)
+        v, g = grad_and_conv(audio, mode=mode, place=place)
+        print(place, mode, v, g)
