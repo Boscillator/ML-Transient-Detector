@@ -30,7 +30,7 @@ class Hyperparameters:
     plots_dir: Path = field(default_factory=lambda: Path("data/plots"))
     """Root directory to save plots to"""
 
-    chunk_length_sec: float = 1.0
+    chunk_length_sec: float = 5.0
     """Length of snippets used for training"""
 
     label_width_sec: float = 0.01
@@ -39,7 +39,7 @@ class Hyperparameters:
     num_channels: int = 2
     """Number of channels to use in transient detector architecture"""
 
-    train_dataset_size: int = 40
+    train_dataset_size: int = 20
 
 
 @jax.tree_util.register_dataclass
@@ -58,7 +58,6 @@ class Chunk:
     """Times of transients in seconds, relative to the start of the chunk"""
 
 
-
 @jax.tree_util.register_dataclass
 @dataclass
 class Params:
@@ -70,6 +69,10 @@ class Params:
 
     bias: float
     """Channel sum bias"""
+
+    post_gain: float
+
+    post_bias: float
 
 
 def plot_chunk(
@@ -200,37 +203,48 @@ def load_data(
     return chunks
 
 
+def softmax_kernel(window_size: float) -> jnp.ndarray:
+    half = MAX_WINDOW_SIZE // 2
+    idxs = jnp.arange(-half, half + 1)
+    mask = idxs <= 0
+    causal_idxs = idxs * mask
+
+    # Causal softmax kernel: only current and past
+    # Set future weights to -inf so softmax is zero there
+    logits = -((causal_idxs / window_size) ** 2)
+    logits = jnp.where(mask, logits, -jnp.inf)
+    kernel = jax.nn.softmax(logits)
+    result = kernel / kernel.sum()
+    return result + 1e-8
+
+
+def rectangle_kernel(window_size: float) -> jnp.ndarray:
+    half = MAX_WINDOW_SIZE // 2
+    idxs = jnp.arange(-half, half + 1)
+
+    width = jnp.clip(window_size, 1.0, MAX_WINDOW_SIZE)
+    rect_mask = (idxs >= -width + 1) & (idxs <= 0)
+    kernel = rect_mask.astype(jnp.float32)
+    result = kernel / kernel.sum()
+    return result + 1e-8
+
+
 def moving_average(
     x: jnp.ndarray,
     window_size_s: float,
     sample_rate: int,
-    max_kernel_size: int = MAX_WINDOW_SIZE,
     is_training: bool = True,
 ) -> jnp.ndarray:
     """
-    Differentiable causal moving average with a fixed-length kernel.
-    Kernel weights depend smoothly on window_size_s.
+    Differentiable, fractional window moving average with a softmax or rectangle kernel.
     """
-    window_size_samples = window_size_s * sample_rate
-
-    idx = jnp.arange(-max_kernel_size // 2, max_kernel_size // 2)
+    window_size = sample_rate * window_size_s
     if is_training:
-        sharpness = 1
-        weights = jnp.where(
-            idx <= 0, jax.nn.sigmoid(sharpness * (idx + window_size_samples)), 0.0
-        )
-        weights = jnp.flip(weights + 1e-8)
+        kernel = softmax_kernel(window_size)
     else:
-        weights = jnp.where((idx > -window_size_samples) & (idx <= 0), 1.0, 0.0).astype(
-            jnp.float32
-        )
-        weights = jnp.flip(weights)
+        kernel = rectangle_kernel(window_size)
 
-    conv_result = jnp.convolve(x, weights, mode="same")
-
-    divisor = jnp.maximum(jnp.sum(weights), 1e-8)
-    result = conv_result / divisor
-    return result
+    return jnp.convolve(x, kernel, mode="same")
 
 
 def transient_detector(
@@ -253,7 +267,7 @@ def transient_detector(
     channels = channel_v(params.window_size_sec, params.weights)
 
     pre_activation = jnp.sum(channels, axis=0) + params.bias
-    result = jax.nn.sigmoid(pre_activation)
+    result = jax.nn.sigmoid(params.post_gain * jax.nn.sigmoid(pre_activation) + params.post_bias)
     if not return_aux:
         return result
     else:
@@ -276,14 +290,24 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
                 jnp.array(params.window_size_sec),
                 jnp.array(params.weights),
                 jnp.array([params.bias]),
+                jnp.array([params.post_gain]),
+                jnp.array([params.post_bias]),
             ]
         )
 
     def flat_to_params(flat):
         window_size_sec = jnp.array(flat[:num_channels])
         weights = jnp.array(flat[num_channels : 2 * num_channels])
-        bias = jnp.array(flat[-1])
-        return Params(window_size_sec=window_size_sec, weights=weights, bias=bias)  # type: ignore
+        bias = flat[2 * num_channels]
+        post_gain = flat[2 * num_channels + 1]
+        post_bias = flat[2 * num_channels + 2]
+        return Params(
+            window_size_sec=window_size_sec,
+            weights=weights,
+            bias=bias,
+            post_gain=post_gain,
+            post_bias=post_bias,
+        )
 
     def loss(flat_params):
         params = flat_to_params(flat_params)
@@ -292,9 +316,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             predictions = transient_detector_j(
                 hyperparameters, params, c, is_training=True
             )
-            # jax.debug.print("Predictions: {predictions}", predictions=predictions)
-            this_loss = optax.losses.sigmoid_focal_loss(predictions, c.labels).mean()
-            # jax.debug.print("Loss: {this_loss}", this_loss=this_loss)
+            this_loss = optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean()
             losses.append(this_loss)
         losses = jnp.array(losses)
         return jnp.sum(losses) / len(chunks)
@@ -308,12 +330,20 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     # Initial guess
     init_params = Params(
         window_size_sec=jnp.array([0.001, 0.01]),
-        weights=jnp.array([100.0, -100.0]),
-        bias=-10.0,
+        weights=jnp.array([10.0, -10.0]),
+        bias=0.0,
+        post_gain=10.0,
+        post_bias=0.0,
     )
     x0 = params_to_flat(init_params)
 
-    bounds = [(0.0001, 0.1)] * num_channels + [(-200, 200)] * num_channels + [(-20, 20)]
+    bounds = (
+        [(0.0001, 0.5)] * num_channels +  # window_size_sec
+        [(-200, 200)] * num_channels +    # weights
+        [(-20, 20)] +                    # bias
+        [(0.0, 100.0)] +                 # post_gain (reasonable range for gain)
+        [(-20, 20)]                      # post_bias
+    )
 
     minimizer_kwargs = {
         "method": "L-BFGS-B",
@@ -356,6 +386,8 @@ def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         window_size_sec=jnp.array([0.001, 0.01]),
         weights=jnp.array([100.0, -100.0]),
         bias=-10.0,
+        post_gain=10.0,
+        post_bias=0.0,
     )
 
     opt_state = optimizer.init(params)
@@ -383,15 +415,19 @@ def main():
     hyperparameters = Hyperparameters()
     params = Params(
         window_size_sec=jnp.array([0.001, 0.01]),
-        weights=jnp.array([100.0, -100.0]),
-        bias=-10.0,
+        weights=jnp.array([10.0, -10.0]),
+        bias=0.0,
+        post_gain=10.0,
+        post_bias=0.0,
     )
 
     # Clear out plots folder
     shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
 
     # Load data
-    chunks = load_data(hyperparameters, filter={"DarkIllusion_Kick", "DarkIllusion_ElecGtr5DI"})
+    chunks = load_data(
+        hyperparameters, filter={"DarkIllusion_Kick", "DarkIllusion_ElecGtr5DI"}
+    )
     chunks = random.sample(chunks, hyperparameters.train_dataset_size)
 
     # Display pre-optimized solution
@@ -412,6 +448,7 @@ def main():
 
     # Optimize
     params = optimize(hyperparameters, chunks)
+    logger.info("Optimized params: %s", params)
 
     # Display post-optimized solution
     for i, chunk in enumerate(chunks):
@@ -430,13 +467,6 @@ def main():
             channel_outputs=aux["channel_outputs"],
             preactivation=aux["pre_activation"],
         )
-
-    def oop(params):
-        return jnp.sum(
-            transient_detector_j(hyperparameters, params, chunks[0], is_training=False)
-        )
-
-    print(jax.value_and_grad(oop)(params))
 
 
 if __name__ == "__main__":
