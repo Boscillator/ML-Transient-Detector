@@ -394,56 +394,6 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     return best_params
 
 
-# def train(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
-#     import optax
-
-#     # Flatten/unflatten Params for optax
-#     num_channels = hyperparameters.num_channels
-
-#     def loss(params, batch):
-#         losses = []
-#         for c in batch:
-#             predictions = transient_detector_j(
-#                 hyperparameters, params, c, is_training=True
-#             )
-#             losses.append(
-#                 optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean()
-#             )
-#         losses = jnp.array(losses)
-#         return jnp.mean(losses)
-
-#     # SGD setup
-#     learning_rate = 1e-3
-#     optimizer = optax.sgd(learning_rate)
-#     # Initial params
-#     params = Params(
-#         window_size_sec=jnp.array([0.001, 0.01]),
-#         weights=jnp.array([100.0, -100.0]),
-#         bias=-10.0,
-#         post_gain=10.0,
-#         post_bias=0.0,
-#     )
-
-#     opt_state = optimizer.init(params)
-
-#     # Training loop
-#     batch_size = min(5, len(chunks))
-#     num_steps = 400
-#     for step in range(num_steps):
-#         # Simple batching
-#         batch_idx = np.random.choice(len(chunks), batch_size, replace=False)
-#         batch = [chunks[i] for i in batch_idx]
-#         loss_val, grads = jax.value_and_grad(loss)(params, batch)
-#         updates, opt_state = optimizer.update(grads, opt_state)
-#         params = optax.apply_updates(params, updates)
-#         if step % 10 == 0:
-#             print(params)
-#             print(grads)
-#             print(f"Step {step}: loss={loss_val}")
-
-#     return params
-
-
 def main():
     logging.basicConfig(level=logging.INFO)
     random.seed(42)
