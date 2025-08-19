@@ -37,16 +37,16 @@ class Hyperparameters:
     label_width_sec: float = 0.01
     """Width of pulse generated, centered on a transient"""
 
-    num_channels: int = 2
+    num_channels: int = 5
     """Number of channels to use in transient detector architecture"""
 
     train_dataset_size: int = 20
     """Number of chunks to include in the training dataset"""
 
-    enable_filters: bool = False
+    enable_filters: bool = True
     """Whether to apply a bandpass filter to the beginning of each channel"""
 
-    prenormalize_audio: bool = True
+    prenormalize_audio: bool = False
     """Normalize all audio clips so their peak is at 0 dBFS"""
 
 
@@ -192,6 +192,12 @@ def load_data(
             start = i * chunk_len
             end = min((i + 1) * chunk_len, total_len)
             audio_chunk = audio[start:end]
+
+            # Normalize chunk to [-1, 1]
+            if hyperparameters.prenormalize_audio:
+                max_val = jnp.max(jnp.abs(audio_chunk))
+                audio_chunk = audio_chunk / max_val
+
             # Find transients in this chunk
             chunk_start_sec = start / sample_rate
             chunk_end_sec = end / sample_rate
@@ -337,9 +343,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             predictions = transient_detector_j(
                 hyperparameters, params, c, is_training=True
             )
-            this_loss = optax.losses.sigmoid_binary_cross_entropy(
-                predictions, c.labels
-            ).mean()
+            this_loss = optax.losses.sigmoid_focal_loss(predictions, c.labels).mean()
             losses.append(this_loss)
         losses = jnp.array(losses)
         return jnp.sum(losses) / len(chunks)
@@ -353,7 +357,10 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     # Initial guess
     init_params = Params(
         window_size_sec=jnp.array([0.01] * num_channels),
-        weights=jnp.array([10.0] * num_channels) * jnp.where(jnp.arange(num_channels) % 2 == 0, 1, -1), # Alternating sign helps optimizer
+        weights=jnp.array([10.0] * num_channels)
+        * jnp.where(
+            jnp.arange(num_channels) % 2 == 0, 1, -1
+        ),  # Alternating sign helps optimizer
         filter_f0s=jnp.array([2000.0] * num_channels),
         filter_qs=jnp.array([1.0] * num_channels),
         bias=0.0,
@@ -462,20 +469,20 @@ def main():
     chunks = random.sample(chunks, hyperparameters.train_dataset_size)
 
     # Display pre-optimized solution
-    for i, chunk in enumerate(chunks[:10]):
-        logger.info("Processing chunk %d", i)
-        predictions, aux = transient_detector_j(
-            hyperparameters, params, chunk, is_training=True, return_aux=True
-        )
-        plot_chunk(
-            hyperparameters,
-            "pre_optimized",
-            f"chunk_{i}",
-            chunk,
-            show_labels=True,
-            show_transients=True,
-            predictions=predictions,
-        )
+    # for i, chunk in enumerate(chunks[:10]):
+    #     logger.info("Processing chunk %d", i)
+    #     predictions, aux = transient_detector_j(
+    #         hyperparameters, params, chunk, is_training=True, return_aux=True
+    #     )
+    #     plot_chunk(
+    #         hyperparameters,
+    #         "pre_optimized",
+    #         f"chunk_{i}",
+    #         chunk,
+    #         show_labels=False,
+    #         show_transients=False,
+    #         predictions=predictions,
+    #     )
 
     # Optimize
     params = optimize(hyperparameters, chunks)
