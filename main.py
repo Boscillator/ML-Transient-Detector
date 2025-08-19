@@ -10,7 +10,7 @@ import optax
 import random
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from filters import design_biquad_bandpass, biquad_apply, apply_fir_filter
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,8 @@ class Hyperparameters:
 
     prenormalize_audio: bool = False
     """Normalize all audio clips so their peak is at 0 dBFS"""
+
+    optimization_method: Literal["basinhopping", "differential_evolution"] = "differential_evolution"
 
 
 @jax.tree_util.register_dataclass
@@ -343,7 +345,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             predictions = transient_detector_j(
                 hyperparameters, params, c, is_training=True
             )
-            this_loss = optax.losses.sigmoid_focal_loss(predictions, c.labels).mean()
+            this_loss = optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean()
             losses.append(this_loss)
         losses = jnp.array(losses)
         return jnp.sum(losses) / len(chunks)
@@ -386,12 +388,27 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         "options": {"maxiter": 100, "disp": True},
     }
     logger.info("Starting optimization with initial params: %s", init_params)
-    result = scipy.optimize.basinhopping(
-        scipy_loss_and_grad, x0, minimizer_kwargs=minimizer_kwargs, niter=10, disp=True
-    )
-    best_params = flat_to_params(result.x)
-    logger.info("Basinhopping optimization result: %s", result)
-    return best_params
+    if hyperparameters.optimization_method == "basinhopping":
+        result = scipy.optimize.basinhopping(
+            scipy_loss_and_grad, x0, minimizer_kwargs=minimizer_kwargs, niter=10, disp=True
+        )
+        best_params = flat_to_params(result.x)
+        logger.info("Basinhopping optimization result: %s", result)
+        return best_params
+    elif hyperparameters.optimization_method == "differential_evolution":
+        result = scipy.optimize.differential_evolution(
+            loss,
+            bounds,
+            callback=lambda intermediate_result=None: print(intermediate_result),
+            maxiter=100,
+            disp=True,
+            polish=True,
+        )
+        best_params = flat_to_params(result.x)
+        logger.info("Differential evolution optimization result: %s", result)
+        return best_params
+    else:
+        raise ValueError(f"Unknown optimization_method: {hyperparameters.optimization_method}")
 
 
 def main():
