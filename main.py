@@ -37,21 +37,23 @@ class Hyperparameters:
     label_width_sec: float = 0.01
     """Width of pulse generated, centered on a transient"""
 
-    num_channels: int = 4
+    num_channels: int = 2
     """Number of channels to use in transient detector architecture"""
 
     train_dataset_size: int = 5
     """Number of chunks to include in the training dataset"""
 
-    enable_filters: bool = True
+    enable_filters: bool = False
     """Whether to apply a bandpass filter to the beginning of each channel"""
 
-    prenormalize_audio: bool = True
+    prenormalize_audio: bool = False
     """Normalize all audio clips so their peak is at 0 dBFS"""
 
     optimization_method: Literal["basinhopping", "differential_evolution"] = (
         "differential_evolution"
     )
+
+    enable_compressor: bool = True
 
 
 @jax.tree_util.register_dataclass
@@ -93,6 +95,10 @@ class Params:
 
     post_bias: float
     """Bias for channel sum"""
+
+    compressor_window_size_sec: float
+
+    compressor_gain: float
 
 
 def plot_chunk(
@@ -270,16 +276,22 @@ def transient_detector(
     is_training: bool = True,
     return_aux: bool = False,
 ):
+
+    if hyperparameters.enable_compressor:
+        compressor_env = moving_average(chunk.audio, params.compressor_window_size_sec, chunk.sample_rate)
+        audio = chunk.audio / (compressor_env + 1e-8) * params.compressor_gain
+    else:
+        audio = chunk.audio
+
     def channel(window_size_s, weight, f0, q) -> jnp.ndarray:
         if hyperparameters.enable_filters:
             b, a = design_biquad_bandpass(f0, q, chunk.sample_rate)
-            # if is_training:
-            if False:
-                filtered = apply_fir_filter(chunk.audio, b, a)
+            if is_training:
+                filtered = apply_fir_filter(audio, b, a)
             else:
-                filtered = biquad_apply(chunk.audio, b, a)
+                filtered = biquad_apply(audio, b, a)
         else:
-            filtered = chunk.audio
+            filtered = audio
         power = filtered**2
         avg = moving_average(
             power, window_size_s, chunk.sample_rate, is_training=is_training
@@ -332,6 +344,8 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         bias = flat[4 * num_channels]
         post_gain = flat[4 * num_channels + 1]
         post_bias = flat[4 * num_channels + 2]
+        compressor_window_size_sec = flat[4 * num_channels + 3]
+        compressor_gain = flat[4 * num_channels + 4]
         return Params(
             window_size_sec=window_size_sec,
             weights=weights,
@@ -340,6 +354,8 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             bias=bias,
             post_gain=post_gain,
             post_bias=post_bias,
+            compressor_window_size_sec=compressor_window_size_sec,
+            compressor_gain=compressor_gain
         )
 
     def loss(flat_params):
@@ -372,6 +388,8 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         bias=0.0,
         post_gain=10.0,
         post_bias=0.0,
+        compressor_window_size_sec=0.01,
+        compressor_gain=0.0
     )
     x0 = params_to_flat(init_params)
 
@@ -383,6 +401,8 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         + [(-20, 20)]  # bias
         + [(0.0, 100.0)]  # post_gain
         + [(-20, 20)]  # post_bias
+        + [(0.0001, 0.5)]  # compressor_window_size_sec
+        + [(0.0, 100.0)]  # compressor_gain
     )
 
     minimizer_kwargs = {
@@ -434,16 +454,9 @@ def main():
         bias=-10,
         post_gain=10,
         post_bias=0.0,
+        compressor_gain=1.0,
+        compressor_window_size_sec=0.1
     )
-    # params = Params(
-    #     window_size_sec=jnp.array([0.2736782, 0.28159073, 0.12303665, 0.00095833]),
-    #     weights=jnp.array([9.862206, 81.88036, 135.50629, 134.74747]),
-    #     filter_f0s=jnp.array([15414.739, 7322.059, 14259.259, 8319.544]),
-    #     filter_qs=jnp.array([1.8756838, 4.07662, 2.9322958, 3.0069635]),
-    #     bias=np.float64(-1.842190948911615),
-    #     post_gain=np.float64(43.4716256547256),
-    #     post_bias=np.float64(-5.700840007924359),
-    # )
 
     # Clear out plots folder
     shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
@@ -455,20 +468,22 @@ def main():
     chunks = random.sample(chunks, hyperparameters.train_dataset_size)
 
     # Display pre-optimized solution
-    # for i, chunk in enumerate(chunks[:10]):
-    #     logger.info("Processing chunk %d", i)
-    #     predictions, aux = transient_detector_j(
-    #         hyperparameters, params, chunk, is_training=True, return_aux=True
-    #     )
-    #     plot_chunk(
-    #         hyperparameters,
-    #         "pre_optimized",
-    #         f"chunk_{i}",
-    #         chunk,
-    #         show_labels=True,
-    #         show_transients=True,
-    #         predictions=predictions,
-    #     )
+    for i, chunk in enumerate(chunks[:10]):
+        logger.info("Processing chunk %d", i)
+        predictions, aux = transient_detector_j(
+            hyperparameters, params, chunk, is_training=True, return_aux=True
+        )
+        plot_chunk(
+            hyperparameters,
+            "pre_optimized",
+            f"chunk_{i}",
+            chunk,
+            show_labels=True,
+            show_transients=True,
+            predictions=predictions,
+            channel_outputs=aux["channel_outputs"],
+            preactivation=aux["pre_activation"],
+        )
 
     # Optimize
     params = optimize(hyperparameters, chunks)
