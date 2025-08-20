@@ -37,19 +37,21 @@ class Hyperparameters:
     label_width_sec: float = 0.01
     """Width of pulse generated, centered on a transient"""
 
-    num_channels: int = 5
+    num_channels: int = 4
     """Number of channels to use in transient detector architecture"""
 
-    train_dataset_size: int = 20
+    train_dataset_size: int = 5
     """Number of chunks to include in the training dataset"""
 
     enable_filters: bool = True
     """Whether to apply a bandpass filter to the beginning of each channel"""
 
-    prenormalize_audio: bool = False
+    prenormalize_audio: bool = True
     """Normalize all audio clips so their peak is at 0 dBFS"""
 
-    optimization_method: Literal["basinhopping", "differential_evolution"] = "differential_evolution"
+    optimization_method: Literal["basinhopping", "differential_evolution"] = (
+        "differential_evolution"
+    )
 
 
 @jax.tree_util.register_dataclass
@@ -131,6 +133,7 @@ def plot_chunk(
         ax_main.plot(predictions, label="Predictions")
     ax_main.set_title(title)
     ax_main.legend()
+    ax_main.set_xlim((0, 0.5 * 48000))
     ax_main.set_ylim((-1.1, 1.1))
 
     if channel_outputs is not None:
@@ -270,7 +273,8 @@ def transient_detector(
     def channel(window_size_s, weight, f0, q) -> jnp.ndarray:
         if hyperparameters.enable_filters:
             b, a = design_biquad_bandpass(f0, q, chunk.sample_rate)
-            if is_training:
+            # if is_training:
+            if False:
                 filtered = apply_fir_filter(chunk.audio, b, a)
             else:
                 filtered = biquad_apply(chunk.audio, b, a)
@@ -345,7 +349,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             predictions = transient_detector_j(
                 hyperparameters, params, c, is_training=True
             )
-            this_loss = optax.losses.sigmoid_binary_cross_entropy(predictions, c.labels).mean()
+            this_loss = optax.losses.sigmoid_focal_loss(predictions, c.labels).mean()
             losses.append(this_loss)
         losses = jnp.array(losses)
         return jnp.sum(losses) / len(chunks)
@@ -358,7 +362,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
 
     # Initial guess
     init_params = Params(
-        window_size_sec=jnp.array([0.01] * num_channels),
+        window_size_sec=jnp.array([0.1] * num_channels),
         weights=jnp.array([10.0] * num_channels)
         * jnp.where(
             jnp.arange(num_channels) % 2 == 0, 1, -1
@@ -390,7 +394,11 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     logger.info("Starting optimization with initial params: %s", init_params)
     if hyperparameters.optimization_method == "basinhopping":
         result = scipy.optimize.basinhopping(
-            scipy_loss_and_grad, x0, minimizer_kwargs=minimizer_kwargs, niter=10, disp=True
+            scipy_loss_and_grad,
+            x0,
+            minimizer_kwargs=minimizer_kwargs,
+            niter=10,
+            disp=True,
         )
         best_params = flat_to_params(result.x)
         logger.info("Basinhopping optimization result: %s", result)
@@ -408,7 +416,9 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         logger.info("Differential evolution optimization result: %s", result)
         return best_params
     else:
-        raise ValueError(f"Unknown optimization_method: {hyperparameters.optimization_method}")
+        raise ValueError(
+            f"Unknown optimization_method: {hyperparameters.optimization_method}"
+        )
 
 
 def main():
@@ -425,6 +435,15 @@ def main():
         post_gain=10,
         post_bias=0.0,
     )
+    # params = Params(
+    #     window_size_sec=jnp.array([0.2736782, 0.28159073, 0.12303665, 0.00095833]),
+    #     weights=jnp.array([9.862206, 81.88036, 135.50629, 134.74747]),
+    #     filter_f0s=jnp.array([15414.739, 7322.059, 14259.259, 8319.544]),
+    #     filter_qs=jnp.array([1.8756838, 4.07662, 2.9322958, 3.0069635]),
+    #     bias=np.float64(-1.842190948911615),
+    #     post_gain=np.float64(43.4716256547256),
+    #     post_bias=np.float64(-5.700840007924359),
+    # )
 
     # Clear out plots folder
     shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
@@ -446,8 +465,8 @@ def main():
     #         "pre_optimized",
     #         f"chunk_{i}",
     #         chunk,
-    #         show_labels=False,
-    #         show_transients=False,
+    #         show_labels=True,
+    #         show_transients=True,
     #         predictions=predictions,
     #     )
 
