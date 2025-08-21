@@ -117,43 +117,66 @@ def plot_chunk(
     """
 
     os.makedirs(hyperparameters.plots_dir / folder, exist_ok=True)
-
-    if channel_outputs is not None:
-        fig, (ax_main, ax_channels) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-    else:
-        fig, ax_main = plt.subplots(1, 1, figsize=(12, 6), sharex=True)
-
-    ax_main.plot(chunk.audio, label="Audio")
-    if show_labels:
-        ax_main.plot(chunk.labels, label="Labels")
-    if show_transients:
-        ax_main.vlines(
-            chunk.transient_times_sec * chunk.sample_rate,
-            -1,
-            1,
-            color="r",
-            linestyles="dotted",
-            label="Transients",
-        )
-    if predictions is not None:
-        ax_main.plot(predictions, label="Predictions")
-    ax_main.set_title(title)
-    ax_main.legend()
-    ax_main.set_xlim((0, 0.5 * 48000))
-    ax_main.set_ylim((-1.1, 1.1))
-
-    if channel_outputs is not None:
-        for i in range(channel_outputs.shape[0]):
-            ax_channels.plot(channel_outputs[i], label=f"Channel {i}")
-        if preactivation is not None:
-            ax_channels.plot(
-                preactivation, label="Pre-activation", linestyle="--", color="gray"
+    sample_rate = chunk.sample_rate
+    chunk_len = len(chunk.audio)
+    seconds = int(np.ceil(chunk_len / sample_rate))
+    for sec in range(seconds):
+        start = sec * sample_rate
+        end = min((sec + 1) * sample_rate, chunk_len)
+        fig = None
+        ax_channels = None
+        if channel_outputs is not None:
+            fig, (ax_main, ax_channels) = plt.subplots(
+                2, 1, figsize=(12, 8), sharex=True
             )
-        ax_channels.set_title("Channel Outputs")
-        ax_channels.legend()
+        else:
+            fig, ax_main = plt.subplots(1, 1, figsize=(12, 6), sharex=True)
 
-    plt.savefig(hyperparameters.plots_dir / folder / f"{title}.png")
-    plt.close()
+        ax_main.plot(np.arange(start, end), chunk.audio[start:end], label="Audio")
+        if show_labels:
+            ax_main.plot(np.arange(start, end), chunk.labels[start:end], label="Labels")
+        if show_transients:
+            # Only plot transients in this window
+            trans_samples = chunk.transient_times_sec * sample_rate
+            trans_mask = (trans_samples >= start) & (trans_samples < end)
+            trans_samples_in_window = trans_samples[trans_mask]
+            ax_main.vlines(
+                trans_samples_in_window,
+                -1,
+                1,
+                color="r",
+                linestyles="dotted",
+                label="Transients",
+            )
+        if predictions is not None:
+            ax_main.plot(
+                np.arange(start, end), predictions[start:end], label="Predictions"
+            )
+        ax_main.set_title(f"{title}_sec{sec}")
+        ax_main.legend()
+        ax_main.set_xlim((start, end))
+        ax_main.set_ylim((-1.1, 1.1))
+
+        if ax_channels is not None:
+            for i in range(channel_outputs.shape[0]):
+                ax_channels.plot(
+                    np.arange(start, end),
+                    channel_outputs[i][start:end],
+                    label=f"Channel {i}",
+                )
+            if preactivation is not None:
+                ax_channels.plot(
+                    np.arange(start, end),
+                    preactivation[start:end],
+                    label="Pre-activation",
+                    linestyle="--",
+                    color="gray",
+                )
+            ax_channels.set_title("Channel Outputs")
+            ax_channels.legend()
+
+        plt.savefig(hyperparameters.plots_dir / folder / f"{title}_sec{sec}.png")
+        plt.close()
 
 
 def load_data(
