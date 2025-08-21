@@ -278,7 +278,7 @@ def transient_detector(
 ):
     if hyperparameters.enable_compressor:
         compressor_env = moving_average(
-            chunk.audio ** 2, params.compressor_window_size_sec, chunk.sample_rate
+            chunk.audio**2, params.compressor_window_size_sec, chunk.sample_rate
         )
         audio = chunk.audio * (1 - compressor_env) + 1e-8
     else:
