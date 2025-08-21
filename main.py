@@ -40,7 +40,7 @@ class Hyperparameters:
     num_channels: int = 2
     """Number of channels to use in transient detector architecture"""
 
-    train_dataset_size: int = 5
+    train_dataset_size: int = 10
     """Number of chunks to include in the training dataset"""
 
     enable_filters: bool = False
@@ -276,10 +276,11 @@ def transient_detector(
     is_training: bool = True,
     return_aux: bool = False,
 ):
-
     if hyperparameters.enable_compressor:
-        compressor_env = moving_average(chunk.audio, params.compressor_window_size_sec, chunk.sample_rate)
-        audio = chunk.audio / (compressor_env + 1e-8) * params.compressor_gain
+        compressor_env = moving_average(
+            chunk.audio ** 2, params.compressor_window_size_sec, chunk.sample_rate
+        )
+        audio = chunk.audio * (1 - compressor_env) + 1e-8
     else:
         audio = chunk.audio
 
@@ -355,7 +356,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             post_gain=post_gain,
             post_bias=post_bias,
             compressor_window_size_sec=compressor_window_size_sec,
-            compressor_gain=compressor_gain
+            compressor_gain=compressor_gain,
         )
 
     def loss(flat_params):
@@ -389,7 +390,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         post_gain=10.0,
         post_bias=0.0,
         compressor_window_size_sec=0.01,
-        compressor_gain=0.0
+        compressor_gain=0.0,
     )
     x0 = params_to_flat(init_params)
 
@@ -429,6 +430,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             bounds,
             callback=lambda intermediate_result=None: print(intermediate_result),
             maxiter=100,
+            popsize=25,
             disp=True,
             polish=True,
         )
@@ -447,15 +449,15 @@ def main():
 
     hyperparameters = Hyperparameters()
     params = Params(
-        window_size_sec=jnp.array([0.001, 0.01]),
-        weights=jnp.array([10.0, -10.0]),
+        window_size_sec=jnp.array([0.0001, 0.005]),
+        weights=jnp.array([10.0, -8.0]),
         filter_f0s=jnp.array([200.0, 2000.0]),
         filter_qs=jnp.array([1.0, 1.0]),
-        bias=-10,
-        post_gain=10,
+        bias=-1.0,
+        post_gain=100,
         post_bias=0.0,
         compressor_gain=1.0,
-        compressor_window_size_sec=0.1
+        compressor_window_size_sec=0.1,
     )
 
     # Clear out plots folder
@@ -463,7 +465,7 @@ def main():
 
     # Load data
     chunks = load_data(
-        hyperparameters, filter={"DarkIllusion_Kick", "DarkIllusion_ElecGtr5DI"}
+        hyperparameters, filter={"DarkIllusion_Kick", "DragMeDown_ElecGtr3DI"}
     )
     chunks = random.sample(chunks, hyperparameters.train_dataset_size)
 
