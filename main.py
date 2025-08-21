@@ -396,19 +396,10 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
 
     bounds = (
         [(0.0001, 0.5)] * num_channels  # window_size_sec
-        + [(-5, 5)] * num_channels  # weights
-        + [(-5, 5)] * num_channels  # weights
-        + [(-5, 5)] * num_channels  # weights
-        + [(-5, 5)] * num_channels  # weights
+        + [(-200, 200)] * num_channels  # weights
         + [(20.0, 20000.0)] * num_channels  # filter_f0s (audio band)
-        + [(0.1, 3.0)] * num_channels  # filter_qs (typical Q range)
-        + [(-5, 5)]  # bias
-        + [(0.1, 3.0)] * num_channels  # filter_qs (typical Q range)
-        + [(-5, 5)]  # bias
-        + [(0.1, 3.0)] * num_channels  # filter_qs (typical Q range)
-        + [(-5, 5)]  # bias
-        + [(0.1, 3.0)] * num_channels  # filter_qs (typical Q range)
-        + [(-5, 5)]  # bias
+        + [(0.1, 5.0)] * num_channels  # filter_qs (typical Q range)
+        + [(-20, 20)]  # bias
         + [(0.0, 100.0)]  # post_gain
         + [(-20, 20)]  # post_bias
         + [(0.0001, 0.5)]  # compressor_window_size_sec
@@ -421,7 +412,6 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         "bounds": bounds,
         "options": {"maxiter": 100, "disp": True},
     }
-
     logger.info("Starting optimization with initial params: %s", init_params)
     if hyperparameters.optimization_method == "basinhopping":
         result = scipy.optimize.basinhopping(
@@ -435,19 +425,10 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         logger.info("Basinhopping optimization result: %s", result)
         return best_params
     elif hyperparameters.optimization_method == "differential_evolution":
-
-        def differential_evolution_callback(intermediate_result: Any = None):
-            print(intermediate_result)
-
-
-        def differential_evolution_callback(intermediate_result: Any = None):
-            print(intermediate_result)
-
         result = scipy.optimize.differential_evolution(
             loss,
             bounds,
-            callback=differential_evolution_callback,
-            callback=differential_evolution_callback,
+            callback=lambda intermediate_result=None: print(intermediate_result),
             maxiter=100,
             popsize=25,
             disp=True,
