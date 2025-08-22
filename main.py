@@ -15,8 +15,8 @@ from filters import design_biquad_bandpass, biquad_apply, apply_fir_filter
 
 logger = logging.getLogger(__name__)
 
-MAX_WINDOW_SIZE = int(0.1 * 48000)
 FORCE_SAMPLE_RATE = 48000
+MAX_WINDOW_SIZE = int(0.1 * FORCE_SAMPLE_RATE)
 
 
 @jax.tree_util.register_dataclass
@@ -38,16 +38,16 @@ class Hyperparameters:
     label_front_porch: float = 0.001
     """Width of label before transient event (seconds)"""
 
-    label_back_porch: float = 0.005
+    label_back_porch: float = 0.01
     """Width of label after transient event (seconds)"""
 
-    num_channels: int = 2
+    num_channels: int = 5
     """Number of channels to use in transient detector architecture"""
 
     train_dataset_size: int = 10
     """Number of chunks to include in the training dataset"""
 
-    enable_filters: bool = False
+    enable_filters: bool = True
     """Whether to apply a bandpass filter to the beginning of each channel"""
 
     prenormalize_audio: bool = False
@@ -424,11 +424,15 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     loss_v = jax.jit(jax.vmap(loss, in_axes=1))
 
     # Vectorized loss for differential_evolution (flat_params shape: (num_params, S))
-    def loss_vectorized(flat_params_batch):
+    def loss_vectorized(flat_params_batch, batch_size=32):
         flat_params_batch = jnp.asarray(flat_params_batch)
         flat_params_batch = jax.device_put(flat_params_batch, device)
-        # vmap over columns (solution vectors)
-        return loss_v(flat_params_batch)
+        S = flat_params_batch.shape[1]
+        results = []
+        for i in range(0, S, batch_size):
+            sub_batch = flat_params_batch[:, i : i + batch_size]
+            results.append(loss_v(sub_batch))
+        return jnp.concatenate(results)
 
     loss_and_grad = jax.value_and_grad(loss)
 
@@ -455,8 +459,8 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     x0 = jax.device_put(params_to_flat(init_params), device)
 
     bounds = (
-        [(0.0001, 0.5)] * num_channels  # window_size_sec
-        + [(-2, 2)] * num_channels  # weights
+        [(0.0001, 0.1)] * num_channels  # window_size_sec
+        + [(-20, 20)] * num_channels  # weights
         + [(20.0, 20000.0)] * num_channels  # filter_f0s (audio band)
         + [(0.1, 5.0)] * num_channels  # filter_qs (typical Q range)
         + [(-2, 2)]  # bias
@@ -490,7 +494,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             bounds,
             callback=lambda intermediate_result=None: print(intermediate_result),
             maxiter=100,
-            popsize=25,
+            popsize=15,
             disp=True,
             polish=True,
             vectorized=True,
