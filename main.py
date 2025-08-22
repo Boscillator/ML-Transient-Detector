@@ -298,17 +298,15 @@ def moving_average(
 def transient_detector(
     hyperparameters: Hyperparameters,
     params: Params,
-    chunk: Chunk,
+    audio: jnp.ndarray,
     is_training: bool = True,
     return_aux: bool = False,
 ):
     if hyperparameters.enable_compressor:
         compressor_env = moving_average(
-            chunk.audio**2, params.compressor_window_size_sec, FORCE_SAMPLE_RATE
+            audio**2, params.compressor_window_size_sec, FORCE_SAMPLE_RATE
         )
-        audio = chunk.audio * (1 - compressor_env) + 1e-8
-    else:
-        audio = chunk.audio
+        audio = audio * (1 - compressor_env) + 1e-8
 
     def channel(window_size_s, weight, f0, q) -> jnp.ndarray:
         if hyperparameters.enable_filters:
@@ -390,7 +388,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         losses = []
         for c in chunks:
             predictions = transient_detector_j(
-                hyperparameters, params, c, is_training=True
+                hyperparameters, params, c.audio, is_training=True
             )
             this_loss = optax.losses.sigmoid_focal_loss(predictions, c.labels).mean()
             losses.append(this_loss)
@@ -455,8 +453,8 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             loss,
             bounds,
             callback=lambda intermediate_result=None: print(intermediate_result),
-            maxiter=100,
-            popsize=25,
+            maxiter=1,
+            popsize=1,
             disp=True,
             polish=True,
         )
@@ -499,7 +497,7 @@ def main():
     for i, chunk in enumerate(chunks[:10]):
         logger.info("Processing chunk %d", i)
         predictions, aux = transient_detector_j(
-            hyperparameters, params, chunk, is_training=True, return_aux=True
+            hyperparameters, params, chunk.audio, is_training=True, return_aux=True
         )
         plot_chunk(
             hyperparameters,
@@ -512,7 +510,6 @@ def main():
             channel_outputs=aux["channel_outputs"],
             preactivation=aux["pre_activation"],
         )
-    return
 
     # Optimize
     params = optimize(hyperparameters, chunks)
@@ -522,7 +519,7 @@ def main():
     for i, chunk in enumerate(chunks):
         logger.info("Processing chunk %d", i)
         predictions, aux = transient_detector_j(
-            hyperparameters, params, chunk, is_training=False, return_aux=True
+            hyperparameters, params, chunk.audio, is_training=False, return_aux=True
         )
         plot_chunk(
             hyperparameters,
