@@ -34,8 +34,11 @@ class Hyperparameters:
     chunk_length_sec: float = 5.0
     """Length of snippets used for training"""
 
-    label_width_sec: float = 0.01
-    """Width of pulse generated, centered on a transient"""
+    label_front_porch: float = 0.001
+    """Width of label before transient event (seconds)"""
+
+    label_back_porch: float = 0.005
+    """Width of label after transient event (seconds)"""
 
     num_channels: int = 2
     """Number of channels to use in transient detector architecture"""
@@ -242,12 +245,12 @@ def load_data(
             transients_rel = [t - chunk_start_sec for t in transients_in_chunk]
             # Generate label signal
             labels = jnp.zeros(end - start, dtype=jnp.float32)
-            label_width = hyperparameters.label_width_sec
+            front_porch = int(hyperparameters.label_front_porch * sample_rate)
+            back_porch = int(hyperparameters.label_back_porch * sample_rate)
             for t_rel in transients_rel:
                 center = int(t_rel * sample_rate)
-                half_width = int((label_width * sample_rate) / 2)
-                left = max(center - half_width, 0)
-                right = min(center + half_width, end - start)
+                left = max(center - front_porch, 0)
+                right = min(center + back_porch, end - start)
                 labels = labels.at[left:right].set(1.0)
             chunk = Chunk(
                 audio=audio_chunk,
@@ -509,6 +512,7 @@ def main():
             channel_outputs=aux["channel_outputs"],
             preactivation=aux["pre_activation"],
         )
+    return
 
     # Optimize
     params = optimize(hyperparameters, chunks)
