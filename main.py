@@ -41,7 +41,7 @@ class Hyperparameters:
     label_back_porch: float = 0.01
     """Width of label after transient event (seconds)"""
 
-    num_channels: int = 5
+    num_channels: int = 2
     """Number of channels to use in transient detector architecture"""
 
     train_dataset_size: int = 10
@@ -306,6 +306,7 @@ def transient_detector(
         compressor_env = moving_average(
             audio**2, params.compressor_window_size_sec, FORCE_SAMPLE_RATE
         )
+        compressor_env = jnp.sqrt(compressor_env)
         audio = audio * (1 - compressor_env) + 1e-8
 
     def channel(window_size_s, weight, f0, q) -> jnp.ndarray:
@@ -418,7 +419,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             hyperparameters, params, audio_batch, is_training=True
         )
         # Compute per-chunk loss and average
-        losses = optax.losses.sigmoid_focal_loss(predictions_batch, label_batch)
+        losses = optax.losses.squared_error(predictions_batch, label_batch)
         return losses.mean(axis=(0, 1))
 
     loss_v = jax.jit(jax.vmap(loss, in_axes=1))
@@ -489,10 +490,15 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         logger.info("Basinhopping optimization result: %s", result)
         return best_params
     elif hyperparameters.optimization_method == "differential_evolution":
+
+        def print_intermediate_result(intermediate_result: Any = None):
+            print(intermediate_result)
+            print(flat_to_params(intermediate_result.x))
+
         result = scipy.optimize.differential_evolution(
             loss_vectorized,
             bounds,
-            callback=lambda intermediate_result=None: print(intermediate_result),
+            callback=print_intermediate_result,
             maxiter=100,
             popsize=15,
             disp=True,
