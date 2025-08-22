@@ -407,6 +407,11 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     audio_batch = jnp.stack([pad_to_length(c.audio, max_len) for c in chunks])
     label_batch = jnp.stack([pad_to_length(c.labels, max_len) for c in chunks])
 
+    # Move batches to GPU if available
+    device = jax.devices("gpu")[0] if jax.devices("gpu") else jax.devices()[0]
+    audio_batch = jax.device_put(audio_batch, device)
+    label_batch = jax.device_put(label_batch, device)
+
     def loss(flat_params):
         params = flat_to_params(flat_params)
         predictions_batch = transient_detector_v(
@@ -421,6 +426,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     # Vectorized loss for differential_evolution (flat_params shape: (num_params, S))
     def loss_vectorized(flat_params_batch):
         flat_params_batch = jnp.asarray(flat_params_batch)
+        flat_params_batch = jax.device_put(flat_params_batch, device)
         # vmap over columns (solution vectors)
         return loss_v(flat_params_batch)
 
@@ -445,15 +451,16 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         compressor_window_size_sec=0.01,
         compressor_gain=0.0,
     )
-    x0 = params_to_flat(init_params)
+    # Move initial params to GPU
+    x0 = jax.device_put(params_to_flat(init_params), device)
 
     bounds = (
         [(0.0001, 0.5)] * num_channels  # window_size_sec
-        + [(-200, 200)] * num_channels  # weights
+        + [(-2, 2)] * num_channels  # weights
         + [(20.0, 20000.0)] * num_channels  # filter_f0s (audio band)
         + [(0.1, 5.0)] * num_channels  # filter_qs (typical Q range)
-        + [(-20, 20)]  # bias
-        + [(0.0, 100.0)]  # post_gain
+        + [(-2, 2)]  # bias
+        + [(0.0, 200.0)]  # post_gain
         + [(-20, 20)]  # post_bias
         + [(0.0001, 0.5)]  # compressor_window_size_sec
         + [(0.0, 100.0)]  # compressor_gain
@@ -525,7 +532,7 @@ def main():
     chunks = random.sample(chunks, hyperparameters.train_dataset_size)
 
     # Display pre-optimized solution
-    for i, chunk in enumerate(chunks[:10]):
+    for i, chunk in enumerate(chunks[:2]):
         logger.info("Processing chunk %d", i)
         predictions, aux = transient_detector_j(
             hyperparameters, params, chunk.audio, is_training=True, return_aux=True
@@ -566,5 +573,9 @@ def main():
 
 
 if __name__ == "__main__":
-    jax.config.update("jax_debug_nans", True)
+    jax.config.update("jax_debug_nans", False)
+    jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+    jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
     main()
