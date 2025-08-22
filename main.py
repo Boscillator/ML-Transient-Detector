@@ -403,17 +403,26 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             arr = jnp.pad(arr, (pad_len, 0))
         return arr
 
+    max_len = max(c.audio.shape[0] for c in chunks)
+    audio_batch = jnp.stack([pad_to_length(c.audio, max_len) for c in chunks])
+    label_batch = jnp.stack([pad_to_length(c.labels, max_len) for c in chunks])
+
     def loss(flat_params):
         params = flat_to_params(flat_params)
-        max_len = max(c.audio.shape[0] for c in chunks)
-        audio_batch = jnp.stack([pad_to_length(c.audio, max_len) for c in chunks])
-        label_batch = jnp.stack([pad_to_length(c.labels, max_len) for c in chunks])
         predictions_batch = transient_detector_v(
             hyperparameters, params, audio_batch, is_training=True
         )
         # Compute per-chunk loss and average
         losses = optax.losses.sigmoid_focal_loss(predictions_batch, label_batch)
         return losses.mean(axis=(0, 1))
+
+    loss_v = jax.jit(jax.vmap(loss, in_axes=1))
+
+    # Vectorized loss for differential_evolution (flat_params shape: (num_params, S))
+    def loss_vectorized(flat_params_batch):
+        flat_params_batch = jnp.asarray(flat_params_batch)
+        # vmap over columns (solution vectors)
+        return loss_v(flat_params_batch)
 
     loss_and_grad = jax.value_and_grad(loss)
 
@@ -470,13 +479,15 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         return best_params
     elif hyperparameters.optimization_method == "differential_evolution":
         result = scipy.optimize.differential_evolution(
-            loss,
+            loss_vectorized,
             bounds,
             callback=lambda intermediate_result=None: print(intermediate_result),
-            maxiter=1,
-            popsize=1,
+            maxiter=100,
+            popsize=25,
             disp=True,
             polish=True,
+            vectorized=True,
+            updating="deferred",  # needed for vectorized
         )
         best_params = flat_to_params(result.x)
         logger.info("Differential evolution optimization result: %s", result)
