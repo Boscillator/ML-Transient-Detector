@@ -343,6 +343,20 @@ transient_detector_j = jax.jit(
 )
 
 
+# vmapped version for batch audio
+def _transient_detector_v(hyperparameters, params, audio_batch, is_training=True):
+    return jax.vmap(
+        lambda audio: transient_detector(
+            hyperparameters, params, audio, is_training=is_training, return_aux=False
+        )
+    )(audio_batch)
+
+
+transient_detector_v = jax.jit(
+    _transient_detector_v, static_argnames=("hyperparameters", "is_training")
+)
+
+
 def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
     import scipy.optimize
 
@@ -383,17 +397,23 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             compressor_gain=compressor_gain,
         )
 
+    def pad_to_length(arr, target_len):
+        pad_len = target_len - arr.shape[0]
+        if pad_len > 0:
+            arr = jnp.pad(arr, (pad_len, 0))
+        return arr
+
     def loss(flat_params):
         params = flat_to_params(flat_params)
-        losses = []
-        for c in chunks:
-            predictions = transient_detector_j(
-                hyperparameters, params, c.audio, is_training=True
-            )
-            this_loss = optax.losses.sigmoid_focal_loss(predictions, c.labels).mean()
-            losses.append(this_loss)
-        losses = jnp.array(losses)
-        return jnp.sum(losses) / len(chunks)
+        max_len = max(c.audio.shape[0] for c in chunks)
+        audio_batch = jnp.stack([pad_to_length(c.audio, max_len) for c in chunks])
+        label_batch = jnp.stack([pad_to_length(c.labels, max_len) for c in chunks])
+        predictions_batch = transient_detector_v(
+            hyperparameters, params, audio_batch, is_training=True
+        )
+        # Compute per-chunk loss and average
+        losses = optax.losses.sigmoid_focal_loss(predictions_batch, label_batch)
+        return losses.mean(axis=(0, 1))
 
     loss_and_grad = jax.value_and_grad(loss)
 
