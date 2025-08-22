@@ -16,6 +16,7 @@ from filters import design_biquad_bandpass, biquad_apply, apply_fir_filter
 logger = logging.getLogger(__name__)
 
 MAX_WINDOW_SIZE = int(0.1 * 48000)
+FORCE_SAMPLE_RATE = 48000
 
 
 @jax.tree_util.register_dataclass
@@ -64,9 +65,6 @@ class Hyperparameters:
 class Chunk:
     audio: jnp.ndarray
     """Mono audio data, scaled to +/- 1.0"""
-
-    sample_rate: int
-    """Sample rate of the audio data"""
 
     labels: jnp.ndarray
     """Labels for the audio data, 1.0 at transients with width :ref:`label_width_sec`, 0.0 elsewhere"""
@@ -120,7 +118,7 @@ def plot_chunk(
     """
 
     os.makedirs(hyperparameters.plots_dir / folder, exist_ok=True)
-    sample_rate = chunk.sample_rate
+    sample_rate = FORCE_SAMPLE_RATE
     chunk_len = len(chunk.audio)
     seconds = int(np.ceil(chunk_len / sample_rate))
     for sec in range(seconds):
@@ -207,6 +205,9 @@ def load_data(
         if not wav_path.exists():
             continue
         sample_rate, audio_np = wavfile.read(wav_path)
+        assert sample_rate == FORCE_SAMPLE_RATE, (
+            f"Sample rate {sample_rate} != FORCE_SAMPLE_RATE {FORCE_SAMPLE_RATE} for {wav_path}"
+        )
         # Convert to float32 and normalize to +/-1.0
         if audio_np.dtype == np.int16:
             audio_np = audio_np.astype(np.float32) / 32768.0
@@ -221,7 +222,7 @@ def load_data(
             audio_np = np.mean(audio_np, axis=1)
         audio = jnp.array(audio_np)
 
-        chunk_len = int(hyperparameters.chunk_length_sec * sample_rate)
+        chunk_len = int(hyperparameters.chunk_length_sec * FORCE_SAMPLE_RATE)
         total_len = len(audio)
         num_chunks = (total_len + chunk_len - 1) // chunk_len
 
@@ -236,8 +237,8 @@ def load_data(
                 audio_chunk = audio_chunk / max_val
 
             # Find transients in this chunk
-            chunk_start_sec = start / sample_rate
-            chunk_end_sec = end / sample_rate
+            chunk_start_sec = start / FORCE_SAMPLE_RATE
+            chunk_end_sec = end / FORCE_SAMPLE_RATE
             transients_in_chunk = [
                 t for t in transient_times if chunk_start_sec <= t < chunk_end_sec
             ]
@@ -245,16 +246,15 @@ def load_data(
             transients_rel = [t - chunk_start_sec for t in transients_in_chunk]
             # Generate label signal
             labels = jnp.zeros(end - start, dtype=jnp.float32)
-            front_porch = int(hyperparameters.label_front_porch * sample_rate)
-            back_porch = int(hyperparameters.label_back_porch * sample_rate)
+            front_porch = int(hyperparameters.label_front_porch * FORCE_SAMPLE_RATE)
+            back_porch = int(hyperparameters.label_back_porch * FORCE_SAMPLE_RATE)
             for t_rel in transients_rel:
-                center = int(t_rel * sample_rate)
+                center = int(t_rel * FORCE_SAMPLE_RATE)
                 left = max(center - front_porch, 0)
                 right = min(center + back_porch, end - start)
                 labels = labels.at[left:right].set(1.0)
             chunk = Chunk(
                 audio=audio_chunk,
-                sample_rate=sample_rate,
                 labels=labels,
                 transient_times_sec=jnp.array(transients_rel, dtype=jnp.float32),
             )
@@ -304,7 +304,7 @@ def transient_detector(
 ):
     if hyperparameters.enable_compressor:
         compressor_env = moving_average(
-            chunk.audio**2, params.compressor_window_size_sec, chunk.sample_rate
+            chunk.audio**2, params.compressor_window_size_sec, FORCE_SAMPLE_RATE
         )
         audio = chunk.audio * (1 - compressor_env) + 1e-8
     else:
@@ -312,7 +312,7 @@ def transient_detector(
 
     def channel(window_size_s, weight, f0, q) -> jnp.ndarray:
         if hyperparameters.enable_filters:
-            b, a = design_biquad_bandpass(f0, q, chunk.sample_rate)
+            b, a = design_biquad_bandpass(f0, q, FORCE_SAMPLE_RATE)
             if is_training:
                 filtered = apply_fir_filter(audio, b, a)
             else:
@@ -321,7 +321,7 @@ def transient_detector(
             filtered = audio
         power = filtered**2
         avg = moving_average(
-            power, window_size_s, chunk.sample_rate, is_training=is_training
+            power, window_size_s, FORCE_SAMPLE_RATE, is_training=is_training
         )
         rms = jnp.sqrt(avg)
         weighted_rms = weight * rms
