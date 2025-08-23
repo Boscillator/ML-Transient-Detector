@@ -1,3 +1,4 @@
+from pprint import pprint
 import shutil
 import jax
 import jax.numpy as jnp
@@ -59,6 +60,12 @@ class Hyperparameters:
 
     enable_compressor: bool = True
 
+    ignore_window_sec: float = 0.01
+    """Seconds to ignore after a detection (for evaluation)"""
+
+    match_tolerance_sec: float = 0.01
+    """Seconds to match ground truth transient (for evaluation)"""
+
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
@@ -100,6 +107,49 @@ class Params:
     compressor_window_size_sec: float
 
     compressor_gain: float
+
+
+@dataclass
+class EvaluationResult:
+    threshold: float
+    """The threshold used for evaluation"""
+
+    true_positives: int
+    """Number of true positive detections"""
+
+    false_positives: int
+    """Number of false positive detections"""
+
+    false_negatives: int
+    """Number of false negative detections"""
+
+    precision: float
+    """Precision of the detections"""
+
+    recall: float
+    """Recall of the detections"""
+
+    f1_score: float
+    """F1 score of the detections"""
+
+
+@dataclass
+class ResultsSummary:
+    hyperparameters: Hyperparameters
+    """Hyperparameters used for this training run"""
+
+    parameters: Params
+    """Parameters used for this training run"""
+
+    training_results: List[EvaluationResult]
+    """List of evaluation results for each threshold"""
+
+    validation_results: List[EvaluationResult]
+    """List of evaluation results for each threshold"""
+
+    def get_best_result(self) -> EvaluationResult:
+        """Returns the best evaluation result based on F1 score"""
+        return max(self.validation_results, key=lambda r: r.f1_score)
 
 
 def plot_chunk(
@@ -515,6 +565,85 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         )
 
 
+def evaluate_at_threshold(
+    hyperparameters: Hyperparameters,
+    params: Params,
+    chunks: List[Chunk],
+    threshold: float,
+) -> EvaluationResult:
+    """
+    Evaluates transient detection over a list of chunks, returning aggregate metrics.
+    """
+    sample_rate = FORCE_SAMPLE_RATE
+    ignore_window_sec = hyperparameters.ignore_window_sec
+    match_tolerance_sec = hyperparameters.match_tolerance_sec
+
+    logger.debug("evaluate_at_threshold: start")
+    total_tp = 0
+    total_fp = 0
+    total_fn = 0
+    for i, chunk in enumerate(chunks):
+        logger.debug("evaluate_at_threshold: model prediction for chunk %d", i)
+        predictions = transient_detector_j(
+            hyperparameters, params, chunk.audio, is_training=False, return_aux=False
+        )
+        logger.debug("evaluate_at_threshold: threshold crossing detection")
+        # Find predicted transients: indices where output crosses threshold upward
+        above = predictions > threshold
+        crossings = jnp.where((~above[:-1]) & (above[1:]))[0] + 1
+        # Apply ignore window to avoid double-counting
+        pred_times = []
+        last_pred = -float("inf")
+        for idx in crossings:
+            t = idx / sample_rate
+            if t - last_pred >= ignore_window_sec:
+                pred_times.append(t)
+                last_pred = t
+        pred_times = jnp.array(pred_times)
+
+        logger.debug("evaluate_at_threshold: ground truth extraction")
+        # Ground truth transients
+        gt_times = chunk.transient_times_sec
+
+        logger.debug("evaluate_at_threshold: matching predicted to ground truth")
+        # Match predicted to ground truth within tolerance
+        matched_gt = set()
+        tp = 0
+        for pt in pred_times:
+            # Find closest unmatched ground truth within tolerance
+            diffs = jnp.abs(gt_times - pt)
+            min_diff = jnp.min(diffs) if gt_times.size > 0 else float("inf")
+            if min_diff <= match_tolerance_sec:
+                idx = int(jnp.argmin(diffs))
+                if idx not in matched_gt:
+                    tp += 1
+                    matched_gt.add(idx)
+        fp = len(pred_times) - tp
+        fn = len(gt_times) - tp
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
+
+    logger.debug("evaluate_at_threshold: metrics calculation")
+    precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
+    recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if (precision + recall) > 0
+        else 0.0
+    )
+    logger.debug("evaluate_at_threshold: end")
+    return EvaluationResult(
+        threshold=threshold,
+        true_positives=total_tp,
+        false_positives=total_fp,
+        false_negatives=total_fn,
+        precision=precision,
+        recall=recall,
+        f1_score=f1,
+    )
+
+
 def main():
     logging.basicConfig(level=logging.INFO)
     random.seed(42)
@@ -541,6 +670,9 @@ def main():
     )
     chunks = random.sample(chunks, hyperparameters.train_dataset_size)
 
+    results = evaluate_at_threshold(hyperparameters, params, chunks, 0.7)
+    pprint(results)
+
     # Display pre-optimized solution
     for i, chunk in enumerate(chunks[:2]):
         logger.info("Processing chunk %d", i)
@@ -558,6 +690,7 @@ def main():
             channel_outputs=aux["channel_outputs"],
             preactivation=aux["pre_activation"],
         )
+    return
 
     # Optimize
     params = optimize(hyperparameters, chunks)
