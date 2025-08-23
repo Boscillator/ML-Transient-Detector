@@ -13,6 +13,29 @@ The algorithm leverages several core signal processing concepts to achieve robus
 
 All signal processing operations are implemented in a differentiable manner using the JAX library. This approach allows the entire detection pipeline—including filtering, envelope extraction, and channel combination—to be optimized via machine learning techniques. Differentiability ensures that the parameters governing each stage of the algorithm can be efficiently tuned using gradient-based or population-based optimization methods, facilitating the development of a highly adaptive and performant transient detection system.
 ## 3. Algorithm Architecture
+```mermaid
+flowchart LR
+	A[Input Audio Chunk] --> B{Dynamic Compression}
+	B --> C[Multi-Channel Split]
+	C --> D1[Channel 1]
+	C --> D2[Channel 2]
+	C --> Dn[Channel N]
+	D1 --> E1{Bandpass Filter}
+	D2 --> E2{Bandpass Filter}
+	Dn --> En{Bandpass Filter}
+	E1 --> F1[Envelope Detection]
+	E2 --> F2[Envelope Detection]
+	En --> Fn[Envelope Detection]
+	F1 --> G1[Weighted Output]
+	F2 --> G2[Weighted Output]
+	Fn --> Gn[Weighted Output]
+	G1 --> H[Channel Combination]
+	G2 --> H
+	Gn --> H
+	H --> I[Sigmoid Activation]
+	I --> J[Thresholding]
+	J --> K[Detected Transient Events]
+```
 The architecture of the transient detector is organized as a modular signal processing pipeline, designed to efficiently process audio data and extract transient events. The system operates on mono audio sampled at a fixed rate, segmenting the input into manageable chunks for analysis. Each chunk is processed through a series of stages, which may be selectively enabled or disabled according to the chosen hyperparameters.
 
 The processing flow begins with the optional application of dynamic compression, which serves to attenuate sustained signal components and accentuate transient features. Following compression, the audio signal is distributed across multiple parallel processing channels. Each channel may optionally apply a bandpass filter, with learnable center frequency and Q factor, to focus on specific spectral regions relevant to transient detection.
@@ -132,6 +155,75 @@ Systematic variation of these hyperparameters provides insight into the contribu
 - Parameter Interpretation: Understanding optimized parameter values
 # 9. Appendices
 ## 9.1 Mathematical Derivations
-- Filter Design Equations: Detailed derivation of filter coefficients
-- Moving Average Kernel: Mathematical foundation of differentiable kernel
+### 9.1.1 Filter Design Equations
+The bandpass biquad filter used in each channel is based on the RBJ-style design, which provides a constant skirt gain and a peak gain equal to the quality factor $Q$. The normalized biquad coefficients $b = [b_0, b_1, b_2]$ and $a = [1, a_1, a_2]$ are computed as follows:
+
+Let $f_0$ be the center frequency in Hz, $Q$ the quality factor, and $f_s$ the sample rate. Define:
+
+$$
+w_0 = 2\pi \frac{f_0}{f_s}
+$$
+
+$$
+\alpha = \frac{\sin(w_0)}{2Q}
+$$
+
+The coefficients are then:
+
+$$
+b_0 = \alpha
+$$
+$$
+b_1 = 0
+$$
+$$
+b_2 = -\alpha
+$$
+$$
+a_0 = 1 + \alpha
+$$
+$$
+a_1 = -2 \cos(w_0)
+$$
+$$
+a_2 = 1 - \alpha
+$$
+
+The normalized coefficients are:
+
+$$
+b = \left[ \frac{b_0}{a_0}, \frac{b_1}{a_0}, \frac{b_2}{a_0} \right]
+$$
+$$
+a = \left[ 1, \frac{a_1}{a_0}, \frac{a_2}{a_0} \right]
+$$
+
+For differentiable training, the biquad filter can be converted to a causal FIR filter by matching the frequency response using frequency sampling and inverse FFT. This allows gradients to propagate through the filtering operation.
+## 9.1.2 FIR Conversion of Biquad Filters
+For GPU processing, the biquad filter is converted to a causal finite impulse response (FIR) filter by matching its frequency response. This process involves evaluating the biquad's frequency response $H(e^{j\omega})$ over a grid of frequencies, then using the inverse fast Fourier transform (IFFT) to obtain the FIR filter taps. Specifically:
+
+1. Compute the frequency response of the biquad filter for a set of $N$ frequency points $\omega_k$:
+	$$
+	H(e^{j\omega_k}) = \frac{b_0 + b_1 e^{-j\omega_k} + b_2 e^{-j2\omega_k}}{a_0 + a_1 e^{-j\omega_k} + a_2 e^{-j2\omega_k}}
+	$$
+2. Mirror the frequency response to obtain a full spectrum suitable for real IFFT.
+3. Apply the IFFT to $H(e^{j\omega_k})$ to obtain the impulse response $h[n]$.
+4. Center and shift the impulse response to ensure causality, then truncate to the desired number of FIR taps.
+
+This FIR approximation enables the filter operation to be fully differentiable with respect to its parameters, allowing gradients to propagate during optimization. The resulting FIR filter can be efficiently applied using convolution, and its length is chosen to balance accuracy and computational cost.
+
+### 9.1.3 Moving Average Kernel
+The moving average kernel is used for envelope detection and dynamic compression. For a window size $w$ (in seconds) and sample rate $f_s$, the number of samples in the window is $N = w \cdot f_s$. The causal moving average of a signal $x[n]$ is given by:
+
+$$
+y[n] = \frac{1}{N} \sum_{k=0}^{N-1} x[n-k]
+$$
+
+To enable differentiability with respect to the window size, the kernel weights are constructed to depend smoothly on $w$ during training. This is achieved by using a sigmoid-based weighting function:
+
+$$
+w_k = \sigma(s (k + N))
+$$
+
+where $\sigma$ is the sigmoid function, $s$ is a sharpness parameter, and $k$ indexes the kernel. The weights are flipped and normalized to ensure causality and numerical stability. At inference time, a fixed rectangular window is used for efficient computation.
 ## 9.2 References
