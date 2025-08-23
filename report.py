@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import random
 import sys
+from typing import Any
 import matplotlib
 import matplotlib.pyplot as plt
 import jax.numpy as jnp
@@ -18,7 +19,7 @@ from main import (
     load_data,
     Hyperparameters,
     Params,
-    transient_detector_j,
+    transient_detector,
     ResultsSummary,
     EvaluationResult,
 )
@@ -166,6 +167,72 @@ def figure_3_plot_with_prediction(
     plt.savefig(f"./figures/{name}/figure_3.png")
 
 
+def figure_4_aux_data_stack(
+    name: str, aux_data: Any, chunk: Chunk, predictions: jnp.ndarray
+) -> None:
+    sample_rate = 48000
+    time_axis = np.arange(len(chunk.audio)) / sample_rate
+    # Find crop window around first transient
+    if chunk.transient_times_sec.size > 0:
+        t0 = float(chunk.transient_times_sec[0])
+    else:
+        t0 = 0.0
+    window = 0.1  # seconds to show around transient
+    left = max(t0 - window / 2, 0)
+    right = min(t0 + window / 2, time_axis[-1])
+    idx_left = int(left * sample_rate)
+    idx_right = int(right * sample_rate)
+
+    # Prepare all signals to plot
+    plot_items = []
+
+    plot_items.append(("Audio", chunk.audio[idx_left:idx_right], COLOR_PRIMARY))
+    plot_items.append(
+        ("Labels", chunk.labels[idx_left:idx_right] * chunk.audio.max(), COLOR_PRIMARY)
+    )
+    plot_items.append(("Predictions", predictions[idx_left:idx_right], COLOR_PRIMARY))
+
+    # Add aux data
+    for key in [
+        "original_audio",
+        "compressed_audio",
+        "compressor_envelope",
+        "pre_activation",
+    ]:
+        if key in aux_data:
+            plot_items.append(
+                (
+                    key.replace("_", " ").title(),
+                    np.array(aux_data[key])[idx_left:idx_right],
+                    COLOR_PRIMARY,
+                )
+            )
+    # For arrays with shape (channels, samples)
+    for key in ["filtered_waveforms", "raw_envelopes", "channel_outputs"]:
+        if key in aux_data:
+            arr = np.array(aux_data[key])
+            for i in range(arr.shape[0]):
+                plot_items.append(
+                    (
+                        f"{key.replace('_', ' ').title()} Ch{i}",
+                        arr[i][idx_left:idx_right],
+                        COLOR_PRIMARY,
+                    )
+                )
+
+    n_plots = len(plot_items)
+    fig, axes = plt.subplots(n_plots, 1, figsize=(12, 2 * n_plots), sharex=True)
+    if n_plots == 1:
+        axes = [axes]
+    for ax, (label, data, color) in zip(axes, plot_items):
+        ax.plot(time_axis[idx_left:idx_right], data, color=color, label=label)
+        ax.set_ylabel(label)
+        ax.legend(loc="upper right")
+    axes[-1].set_xlabel("Time (s)")
+    plt.tight_layout()
+    plt.savefig(f"./figures/{name}/figure_4.png")
+
+
 def load_summary(path: Path) -> ResultsSummary:
     with open(path, "r") as f:
         summary_dict = json.load(f)
@@ -247,15 +314,17 @@ def main(model_path):
         figure_1_chunk_with_labels(f"train_{i}", chunk)
         figure_2_chunk_with_labels_and_inset(f"train_{i}", chunk)
 
-        predictions, aux = transient_detector_j(
+        predictions, aux = transient_detector(
             results.hyperparameters,
             results.parameters,
             jnp.array(chunk.audio),
-            is_training=False,
+            is_training=True,
             return_aux=True,
         )
 
         figure_3_plot_with_prediction(f"train_{i}", chunk, predictions)
+
+        figure_4_aux_data_stack(f"train_{i}", aux, chunk, predictions)
 
 
 if __name__ == "__main__":

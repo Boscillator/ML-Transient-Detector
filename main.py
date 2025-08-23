@@ -39,7 +39,7 @@ class Hyperparameters:
     label_front_porch: float = 0.001
     """Width of label before transient event (seconds)"""
 
-    label_back_porch: float = 0.01
+    label_back_porch: float = 0.02
     """Width of label after transient event (seconds)"""
 
     num_channels: int = 2
@@ -63,10 +63,10 @@ class Hyperparameters:
 
     enable_compressor: bool = False
 
-    ignore_window_sec: float = 0.01
+    ignore_window_sec: float = 0.02
     """Seconds to ignore after a detection (for evaluation)"""
 
-    match_tolerance_sec: float = 0.01
+    match_tolerance_sec: float = 0.02
     """Seconds to match ground truth transient (for evaluation)"""
 
 
@@ -355,12 +355,23 @@ def transient_detector(
     is_training: bool = True,
     return_aux: bool = False,
 ):
+    original_audio = audio
+    compressor_env = None
+    compressed_audio = None
+    
     if hyperparameters.enable_compressor:
         compressor_env = moving_average(
             audio**2, params.compressor_window_size_sec, FORCE_SAMPLE_RATE
         )
         compressor_env = jnp.sqrt(compressor_env)
-        audio = audio * (1 - compressor_env) + 1e-8
+        compressed_audio = audio * (1 - compressor_env) + 1e-8
+        audio = compressed_audio
+    else:
+        compressed_audio = audio
+
+    # Store filtered waveforms and envelopes for aux data
+    filtered_waveforms = []
+    raw_envelopes = []
 
     def channel(window_size_s, weight, f0, q) -> jnp.ndarray:
         if hyperparameters.enable_filters:
@@ -371,25 +382,63 @@ def transient_detector(
                 filtered = biquad_apply(audio, b, a)
         else:
             filtered = audio
+        
+        if return_aux:
+            filtered_waveforms.append(filtered)
+        
         power = filtered**2
         avg = moving_average(
             power, window_size_s, FORCE_SAMPLE_RATE, is_training=is_training
         )
         rms = jnp.sqrt(avg)
+        
+        if return_aux:
+            raw_envelopes.append(rms)
+        
         weighted_rms = weight * rms
         return weighted_rms
 
-    channel_v = jax.vmap(channel)
-    channels = channel_v(
-        params.window_size_sec, params.weights, params.filter_f0s, params.filter_qs
-    )
+    if return_aux:
+        # When aux data is requested, don't use vmap to avoid tracer leakage
+        channels = []
+        for i in range(len(params.window_size_sec)):
+            ch = channel(
+                params.window_size_sec[i], 
+                params.weights[i], 
+                params.filter_f0s[i], 
+                params.filter_qs[i]
+            )
+            channels.append(ch)
+        channels = jnp.stack(channels)
+    else:
+        # Use vmap for efficiency when aux data is not needed
+        channel_v = jax.vmap(channel)
+        channels = channel_v(
+            params.window_size_sec, params.weights, params.filter_f0s, params.filter_qs
+        )
 
     pre_activation = jnp.sum(channels, axis=0) + params.bias
     result = jax.nn.sigmoid(params.post_gain * pre_activation + params.post_bias)
     if not return_aux:
         return result
     else:
-        return result, {"channel_outputs": channels, "pre_activation": pre_activation}
+        aux_data = {
+            "channel_outputs": channels, 
+            "pre_activation": pre_activation,
+            "original_audio": original_audio,
+            "compressed_audio": compressed_audio,
+        }
+        
+        if hyperparameters.enable_compressor and compressor_env is not None:
+            aux_data["compressor_envelope"] = compressor_env
+        
+        if filtered_waveforms:
+            aux_data["filtered_waveforms"] = jnp.stack(filtered_waveforms)
+        
+        if raw_envelopes:
+            aux_data["raw_envelopes"] = jnp.stack(raw_envelopes)
+            
+        return result, aux_data
 
 
 transient_detector_j = jax.jit(
@@ -514,9 +563,9 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
 
     bounds = (
         [(0.0001, 0.1)] * num_channels  # window_size_sec
-        + [(-20, 20)] * num_channels  # weights
+        + [(-200, 200)] * num_channels  # weights
         + [(20.0, 20000.0)] * num_channels  # filter_f0s (audio band)
-        + [(0.1, 5.0)] * num_channels  # filter_qs (typical Q range)
+        + [(0.1, 2.0)] * num_channels  # filter_qs (typical Q range)
         + [(-2, 2)]  # bias
         + [(0.0, 200.0)]  # post_gain
         + [(-20, 20)]  # post_bias
@@ -553,7 +602,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             bounds,
             callback=print_intermediate_result,
             maxiter=100,
-            popsize=15,
+            popsize=25,
             disp=True,
             polish=True,
             vectorized=True,
