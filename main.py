@@ -48,7 +48,10 @@ class Hyperparameters:
     train_dataset_size: int = 10
     """Number of chunks to include in the training dataset"""
 
-    enable_filters: bool = True
+    val_dataset_size: int = 10
+    """Number of chunks to include in the validation dataset"""
+
+    enable_filters: bool = False
     """Whether to apply a bandpass filter to the beginning of each channel"""
 
     prenormalize_audio: bool = False
@@ -58,7 +61,7 @@ class Hyperparameters:
         "differential_evolution"
     )
 
-    enable_compressor: bool = True
+    enable_compressor: bool = False
 
     ignore_window_sec: float = 0.01
     """Seconds to ignore after a detection (for evaluation)"""
@@ -595,133 +598,197 @@ def evaluate_at_threshold(
     """
     Evaluates transient detection over a list of chunks, returning aggregate metrics.
     """
-    sample_rate = FORCE_SAMPLE_RATE
-    ignore_window_sec = hyperparameters.ignore_window_sec
-    match_tolerance_sec = hyperparameters.match_tolerance_sec
 
-    logger.debug("evaluate_at_threshold: start")
-    total_tp = 0
-    total_fp = 0
-    total_fn = 0
-    for i, chunk in enumerate(chunks):
-        logger.debug("evaluate_at_threshold: model prediction for chunk %d", i)
-        predictions = transient_detector_j(
-            hyperparameters, params, chunk.audio, is_training=False, return_aux=False
+    # Force JAX to use CPU only for this function
+    old_platform = jax.config.read("jax_platform_name")
+    try:
+        jax.config.update("jax_platform_name", "cpu")
+
+        sample_rate = FORCE_SAMPLE_RATE
+        ignore_window_sec = hyperparameters.ignore_window_sec
+        match_tolerance_sec = hyperparameters.match_tolerance_sec
+
+        def to_cpu(x):
+            if isinstance(x, jnp.ndarray):
+                return jax.device_put(x, jax.devices("cpu")[0])
+            elif isinstance(x, np.ndarray):
+                return jax.device_put(jnp.array(x), jax.devices("cpu")[0])
+            return x
+
+        # Move all chunk audio and transient_times_sec to CPU
+        cpu_chunks = []
+        for chunk in chunks:
+            cpu_chunk = Chunk(
+                audio=to_cpu(chunk.audio),
+                labels=to_cpu(chunk.labels),
+                transient_times_sec=to_cpu(chunk.transient_times_sec),
+            )
+            cpu_chunks.append(cpu_chunk)
+
+        logger.debug("evaluate_at_threshold: start")
+        total_tp = 0
+        total_fp = 0
+        total_fn = 0
+        for i, chunk in enumerate(cpu_chunks):
+            logger.debug("evaluate_at_threshold: model prediction for chunk %d", i)
+            predictions = transient_detector_j(
+                hyperparameters,
+                params,
+                chunk.audio,
+                is_training=False,
+                return_aux=False,
+            )
+            logger.debug("evaluate_at_threshold: threshold crossing detection")
+            pred_times = get_predicted_transient_times(
+                predictions, threshold, sample_rate, ignore_window_sec
+            )
+
+            logger.debug("evaluate_at_threshold: ground truth extraction")
+            gt_times = chunk.transient_times_sec
+
+            logger.debug("evaluate_at_threshold: matching predicted to ground truth")
+            matched_gt = set()
+            tp = 0
+            for pt in pred_times:
+                diffs = jnp.abs(gt_times - pt)
+                min_diff = jnp.min(diffs) if gt_times.size > 0 else float("inf")
+                if min_diff <= match_tolerance_sec:
+                    idx = int(jnp.argmin(diffs))
+                    if idx not in matched_gt:
+                        tp += 1
+                        matched_gt.add(idx)
+            fp = len(pred_times) - tp
+            fn = len(gt_times) - tp
+            total_tp += tp
+            total_fp += fp
+            total_fn += fn
+
+        logger.debug("evaluate_at_threshold: metrics calculation")
+        precision = (
+            total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
         )
-        logger.debug("evaluate_at_threshold: threshold crossing detection")
-        pred_times = get_predicted_transient_times(
-            predictions, threshold, sample_rate, ignore_window_sec
+        recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if (precision + recall) > 0
+            else 0.0
+        )
+        logger.debug("evaluate_at_threshold: end")
+        return EvaluationResult(
+            threshold=threshold,
+            true_positives=total_tp,
+            false_positives=total_fp,
+            false_negatives=total_fn,
+            precision=precision,
+            recall=recall,
+            f1_score=f1,
+        )
+    finally:
+        jax.config.update("jax_platform_name", old_platform)
+
+
+def evaluate_model(
+    hyperparameters: Hyperparameters,
+    params: Params,
+    training_data: List[Chunk],
+    validation_data: List[Chunk],
+) -> ResultsSummary:
+    """
+    Evaluates the model on the provided chunks using the specified hyperparameters and parameters.
+    """
+    thresholds = [0.5, 0.7, 0.9]
+    training_results: List[EvaluationResult] = []
+    validation_results: List[EvaluationResult] = []
+    for threshold in thresholds:
+        training_results.append(
+            evaluate_at_threshold(hyperparameters, params, training_data, threshold)
+        )
+        validation_results.append(
+            evaluate_at_threshold(hyperparameters, params, validation_data, threshold)
         )
 
-        logger.debug("evaluate_at_threshold: ground truth extraction")
-        gt_times = chunk.transient_times_sec
-
-        logger.debug("evaluate_at_threshold: matching predicted to ground truth")
-        matched_gt = set()
-        tp = 0
-        for pt in pred_times:
-            diffs = jnp.abs(gt_times - pt)
-            min_diff = jnp.min(diffs) if gt_times.size > 0 else float("inf")
-            if min_diff <= match_tolerance_sec:
-                idx = int(jnp.argmin(diffs))
-                if idx not in matched_gt:
-                    tp += 1
-                    matched_gt.add(idx)
-        fp = len(pred_times) - tp
-        fn = len(gt_times) - tp
-        total_tp += tp
-        total_fp += fp
-        total_fn += fn
-
-    logger.debug("evaluate_at_threshold: metrics calculation")
-    precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
-    recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
-    f1 = (
-        2 * precision * recall / (precision + recall)
-        if (precision + recall) > 0
-        else 0.0
+    return ResultsSummary(
+        hyperparameters=hyperparameters,
+        parameters=params,
+        training_results=training_results,
+        validation_results=validation_results,
     )
-    logger.debug("evaluate_at_threshold: end")
-    return EvaluationResult(
-        threshold=threshold,
-        true_positives=total_tp,
-        false_positives=total_fp,
-        false_negatives=total_fn,
-        precision=precision,
-        recall=recall,
-        f1_score=f1,
-    )
+
+
+def write_summary(path: Path, results_summary: ResultsSummary):
+    """
+    Writes a summary of the results to a JSON file, converting arrays to lists for serialization.
+    """
+    import json
+
+    def to_serializable(obj):
+        if isinstance(obj, (jnp.ndarray, np.ndarray)):
+            return obj.tolist()
+        elif isinstance(obj, Path):
+            return str(obj)
+        elif hasattr(obj, "__dict__"):
+            # dataclass or similar
+            return {k: to_serializable(v) for k, v in obj.__dict__.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [to_serializable(x) for x in obj]
+        elif isinstance(obj, dict):
+            return {k: to_serializable(v) for k, v in obj.items()}
+        else:
+            return obj
+
+    # Build serializable dict
+    summary_dict = {
+        "hyperparameters": to_serializable(results_summary.hyperparameters),
+        "parameters": to_serializable(results_summary.parameters),
+        "training_results": [
+            to_serializable(r) for r in results_summary.training_results
+        ],
+        "validation_results": [
+            to_serializable(r) for r in results_summary.validation_results
+        ],
+    }
+
+    with open(path, "w") as f:
+        json.dump(summary_dict, f, indent=2)
+
+
+def train_model(
+    name: str,
+    hyperparameters: Hyperparameters,
+    training_data: List[Chunk],
+    validation_data: List[Chunk],
+) -> None:
+    logger.info("Training model with %s", name)
+    params = optimize(hyperparameters, training_data)
+
+    logger.info("Evaluating model with %s", name)
+    results = evaluate_model(hyperparameters, params, training_data, validation_data)
+    logger.info("Got best score of %s", results.get_best_result())
+    write_summary(Path(f"data/results/{name}_results.json"), results)
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     random.seed(42)
 
-    hyperparameters = Hyperparameters()
-    params = Params(
-        window_size_sec=jnp.array([0.0001, 0.005]),
-        weights=jnp.array([10.0, -8.0]),
-        filter_f0s=jnp.array([200.0, 2000.0]),
-        filter_qs=jnp.array([1.0, 1.0]),
-        bias=-1.0,
-        post_gain=100,
-        post_bias=0.0,
-        compressor_gain=1.0,
-        compressor_window_size_sec=0.1,
-    )
-
-    # Clear out plots folder
-    shutil.rmtree(hyperparameters.plots_dir, ignore_errors=True)
+    base_parameters = Hyperparameters()
 
     # Load data
     chunks = load_data(
-        hyperparameters, filter={"DarkIllusion_Kick", "DragMeDown_ElecGtr3DI"}
+        base_parameters, filter={"DarkIllusion_Kick", "DragMeDown_ElecGtr3DI"}
     )
-    chunks = random.sample(chunks, hyperparameters.train_dataset_size)
 
-    results = evaluate_at_threshold(hyperparameters, params, chunks, 0.7)
-    pprint(results)
+    train_chunks = random.sample(chunks, base_parameters.train_dataset_size)
+    validation_chunks = random.sample(chunks, base_parameters.val_dataset_size)
 
-    # Display pre-optimized solution
-    for i, chunk in enumerate(chunks[:2]):
-        logger.info("Processing chunk %d", i)
-        predictions, aux = transient_detector_j(
-            hyperparameters, params, chunk.audio, is_training=True, return_aux=True
-        )
-        plot_chunk(
-            hyperparameters,
-            "pre_optimized",
-            f"chunk_{i}",
-            chunk,
-            show_labels=True,
-            show_transients=True,
-            predictions=predictions,
-            channel_outputs=aux["channel_outputs"],
-            preactivation=aux["pre_activation"],
-        )
-    return
+    trials: List[Tuple[str, Hyperparameters]] = [
+        ("ch2", Hyperparameters(num_channels=2)),
+        # ("ch2_filt", Hyperparameters(num_channels=2, enable_filters=True)),
+    ]
 
-    # Optimize
-    params = optimize(hyperparameters, chunks)
-    logger.info("Optimized params: %s", params)
-
-    # Display post-optimized solution
-    for i, chunk in enumerate(chunks):
-        logger.info("Processing chunk %d", i)
-        predictions, aux = transient_detector_j(
-            hyperparameters, params, chunk.audio, is_training=False, return_aux=True
-        )
-        plot_chunk(
-            hyperparameters,
-            "chunks",
-            f"chunk_{i}",
-            chunk,
-            show_labels=True,
-            show_transients=True,
-            predictions=predictions,
-            channel_outputs=aux["channel_outputs"],
-            preactivation=aux["pre_activation"],
-        )
+    for name, hyperparameters in trials:
+        logger.info("Training '%s'", name)
+        train_model(name, hyperparameters, train_chunks, validation_chunks)
 
 
 if __name__ == "__main__":
