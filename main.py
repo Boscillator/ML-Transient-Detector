@@ -778,12 +778,24 @@ def main():
         base_parameters, filter={"DarkIllusion_Kick", "DragMeDown_ElecGtr3DI"}
     )
 
-    train_chunks = random.sample(chunks, base_parameters.train_dataset_size)
-    validation_chunks = random.sample(chunks, base_parameters.val_dataset_size)
+    random.shuffle(chunks)
+
+    train_chunks = chunks[: base_parameters.train_dataset_size]
+    validation_chunks = chunks[
+        base_parameters.train_dataset_size : base_parameters.train_dataset_size
+        + base_parameters.val_dataset_size
+    ]
 
     trials: List[Tuple[str, Hyperparameters]] = [
         ("ch2", Hyperparameters(num_channels=2)),
-        # ("ch2_filt", Hyperparameters(num_channels=2, enable_filters=True)),
+        ("ch2_filt", Hyperparameters(num_channels=2, enable_filters=True)),
+        ("ch2_comp", Hyperparameters(num_channels=2, enable_compressor=True)),
+        (
+            "ch2_filtcomp",
+            Hyperparameters(
+                num_channels=2, enable_filters=True, enable_compressor=True
+            ),
+        ),
     ]
 
     for name, hyperparameters in trials:
