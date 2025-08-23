@@ -565,6 +565,27 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         )
 
 
+def get_predicted_transient_times(
+    predictions: jnp.ndarray,
+    threshold: float,
+    sample_rate: int,
+    ignore_window_sec: float,
+) -> jnp.ndarray:
+    """
+    Returns predicted transient times (in seconds) from model output, using upward threshold crossings and ignore window.
+    """
+    above = predictions > threshold
+    crossings = jnp.where((~above[:-1]) & (above[1:]))[0] + 1
+    pred_times = []
+    last_pred = -float("inf")
+    for idx in crossings:
+        t = idx / sample_rate
+        if t - last_pred >= ignore_window_sec:
+            pred_times.append(t)
+            last_pred = t
+    return jnp.array(pred_times)
+
+
 def evaluate_at_threshold(
     hyperparameters: Hyperparameters,
     params: Params,
@@ -588,29 +609,17 @@ def evaluate_at_threshold(
             hyperparameters, params, chunk.audio, is_training=False, return_aux=False
         )
         logger.debug("evaluate_at_threshold: threshold crossing detection")
-        # Find predicted transients: indices where output crosses threshold upward
-        above = predictions > threshold
-        crossings = jnp.where((~above[:-1]) & (above[1:]))[0] + 1
-        # Apply ignore window to avoid double-counting
-        pred_times = []
-        last_pred = -float("inf")
-        for idx in crossings:
-            t = idx / sample_rate
-            if t - last_pred >= ignore_window_sec:
-                pred_times.append(t)
-                last_pred = t
-        pred_times = jnp.array(pred_times)
+        pred_times = get_predicted_transient_times(
+            predictions, threshold, sample_rate, ignore_window_sec
+        )
 
         logger.debug("evaluate_at_threshold: ground truth extraction")
-        # Ground truth transients
         gt_times = chunk.transient_times_sec
 
         logger.debug("evaluate_at_threshold: matching predicted to ground truth")
-        # Match predicted to ground truth within tolerance
         matched_gt = set()
         tp = 0
         for pt in pred_times:
-            # Find closest unmatched ground truth within tolerance
             diffs = jnp.abs(gt_times - pt)
             min_diff = jnp.min(diffs) if gt_times.size > 0 else float("inf")
             if min_diff <= match_tolerance_sec:
