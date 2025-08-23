@@ -1,0 +1,31 @@
+figure.facecolor: fafafa
+axes.facecolor: fafafa
+axes.edgecolor: 0e1216
+axes.labelcolor: 0e1216
+axes.titlecolor: 0e1216
+
+xtick.color: 31729B
+ytick.color: 31729B
+
+grid.color: d8dfe4
+grid.linestyle: -
+
+text.color: 0e1216
+
+lines.color: 5396D0
+lines.linewidth: 2.0
+
+patch.edgecolor: 9025B1
+patch.facecolor: 5396D0
+
+font.family: sans-serif
+font.sans-serif: Roboto, Arial, Liberation Sans, DejaVu Sans, sans-serif
+  
+legend.facecolor: fafafa
+legend.edgecolor: d8dfe4
+legend.fontsize: medium
+
+savefig.facecolor: fafafa
+savefig.edgecolor: fafafa
+
+axes.prop_cycle: cycler('color', '5396D0', '9025B1', 'd8dfe4')

@@ -45,10 +45,10 @@ class Hyperparameters:
     num_channels: int = 2
     """Number of channels to use in transient detector architecture"""
 
-    train_dataset_size: int = 10
+    train_dataset_size: int = 20
     """Number of chunks to include in the training dataset"""
 
-    val_dataset_size: int = 10
+    val_dataset_size: int = 20
     """Number of chunks to include in the validation dataset"""
 
     enable_filters: bool = False
@@ -635,7 +635,7 @@ def evaluate_at_threshold(
                 hyperparameters,
                 params,
                 chunk.audio,
-                is_training=False,
+                is_training=True,
                 return_aux=False,
             )
             logger.debug("evaluate_at_threshold: threshold crossing detection")
@@ -774,9 +774,7 @@ def main():
     base_parameters = Hyperparameters()
 
     # Load data
-    chunks = load_data(
-        base_parameters, filter={"DarkIllusion_Kick", "DragMeDown_ElecGtr3DI"}
-    )
+    chunks = load_data(base_parameters)
 
     random.shuffle(chunks)
 
@@ -787,15 +785,28 @@ def main():
     ]
 
     trials: List[Tuple[str, Hyperparameters]] = [
-        ("ch2", Hyperparameters(num_channels=2)),
+        # ("ch2", Hyperparameters(num_channels=2)),
         ("ch2_filt", Hyperparameters(num_channels=2, enable_filters=True)),
-        ("ch2_comp", Hyperparameters(num_channels=2, enable_compressor=True)),
-        (
-            "ch2_filtcomp",
-            Hyperparameters(
-                num_channels=2, enable_filters=True, enable_compressor=True
-            ),
-        ),
+        # ("ch2_comp", Hyperparameters(num_channels=2, enable_compressor=True)),
+        # (
+        #     "ch2_filtcomp",
+        #     Hyperparameters(
+        #         num_channels=2, enable_filters=True, enable_compressor=True
+        #     ),
+        # ),
+        # (
+        #     "ch3_filtcomp",
+        #     Hyperparameters(
+        #         num_channels=3, enable_filters=True, enable_compressor=True
+        #     ),
+        # ),
+        # (
+        #     "ch5_filtcomp",
+        #     Hyperparameters(
+        #         num_channels=5, enable_filters=True, enable_compressor=True
+        #     ),
+        # ),
+        # ("ch5", Hyperparameters(num_channels=5)),
     ]
 
     for name, hyperparameters in trials:
