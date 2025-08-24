@@ -358,7 +358,7 @@ def transient_detector(
     original_audio = audio
     compressor_env = None
     compressed_audio = None
-    
+
     if hyperparameters.enable_compressor:
         compressor_env = moving_average(
             audio**2, params.compressor_window_size_sec, FORCE_SAMPLE_RATE
@@ -382,19 +382,19 @@ def transient_detector(
                 filtered = biquad_apply(audio, b, a)
         else:
             filtered = audio
-        
+
         if return_aux:
             filtered_waveforms.append(filtered)
-        
+
         power = filtered**2
         avg = moving_average(
             power, window_size_s, FORCE_SAMPLE_RATE, is_training=is_training
         )
         rms = jnp.sqrt(avg)
-        
+
         if return_aux:
             raw_envelopes.append(rms)
-        
+
         weighted_rms = weight * rms
         return weighted_rms
 
@@ -403,10 +403,10 @@ def transient_detector(
         channels = []
         for i in range(len(params.window_size_sec)):
             ch = channel(
-                params.window_size_sec[i], 
-                params.weights[i], 
-                params.filter_f0s[i], 
-                params.filter_qs[i]
+                params.window_size_sec[i],
+                params.weights[i],
+                params.filter_f0s[i],
+                params.filter_qs[i],
             )
             channels.append(ch)
         channels = jnp.stack(channels)
@@ -419,25 +419,26 @@ def transient_detector(
 
     pre_activation = jnp.sum(channels, axis=0) + params.bias
     result = jax.nn.sigmoid(params.post_gain * pre_activation + params.post_bias)
+
     if not return_aux:
         return result
     else:
         aux_data = {
-            "channel_outputs": channels, 
+            "channel_outputs": channels,
             "pre_activation": pre_activation,
             "original_audio": original_audio,
             "compressed_audio": compressed_audio,
         }
-        
+
         if hyperparameters.enable_compressor and compressor_env is not None:
             aux_data["compressor_envelope"] = compressor_env
-        
+
         if filtered_waveforms:
             aux_data["filtered_waveforms"] = jnp.stack(filtered_waveforms)
-        
+
         if raw_envelopes:
             aux_data["raw_envelopes"] = jnp.stack(raw_envelopes)
-            
+
         return result, aux_data
 
 
@@ -569,7 +570,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         + [(-2, 2)]  # bias
         + [(0.0, 200.0)]  # post_gain
         + [(-20, 20)]  # post_bias
-        + [(0.0001, 0.5)]  # compressor_window_size_sec
+        + [(0.0001, 0.1)]  # compressor_window_size_sec
         + [(0.0, 100.0)]  # compressor_gain
     )
 
@@ -834,28 +835,28 @@ def main():
     ]
 
     trials: List[Tuple[str, Hyperparameters]] = [
-        # ("ch2", Hyperparameters(num_channels=2)),
+        ("ch2", Hyperparameters(num_channels=2)),
         ("ch2_filt", Hyperparameters(num_channels=2, enable_filters=True)),
-        # ("ch2_comp", Hyperparameters(num_channels=2, enable_compressor=True)),
-        # (
-        #     "ch2_filtcomp",
-        #     Hyperparameters(
-        #         num_channels=2, enable_filters=True, enable_compressor=True
-        #     ),
-        # ),
-        # (
-        #     "ch3_filtcomp",
-        #     Hyperparameters(
-        #         num_channels=3, enable_filters=True, enable_compressor=True
-        #     ),
-        # ),
-        # (
-        #     "ch5_filtcomp",
-        #     Hyperparameters(
-        #         num_channels=5, enable_filters=True, enable_compressor=True
-        #     ),
-        # ),
-        # ("ch5", Hyperparameters(num_channels=5)),
+        ("ch2_comp", Hyperparameters(num_channels=2, enable_compressor=True)),
+        (
+            "ch2_filtcomp",
+            Hyperparameters(
+                num_channels=2, enable_filters=True, enable_compressor=True
+            ),
+        ),
+        (
+            "ch3_filtcomp",
+            Hyperparameters(
+                num_channels=3, enable_filters=True, enable_compressor=True
+            ),
+        ),
+        (
+            "ch5_filtcomp",
+            Hyperparameters(
+                num_channels=5, enable_filters=True, enable_compressor=True
+            ),
+        ),
+        ("ch5", Hyperparameters(num_channels=5)),
     ]
 
     for name, hyperparameters in trials:
