@@ -105,9 +105,7 @@ def figure_3_plot_with_prediction(
     sample_rate = 48000
     time_axis = np.arange(len(chunk.audio)) / sample_rate
     ax.plot(time_axis, chunk.audio, label="Audio", color=COLOR_PRIMARY, linewidth=0.5)
-    ax.plot(
-        time_axis, chunk.labels * chunk.audio.max(), label="Labels", color=COLOR_ACCENT
-    )
+    ax.plot(time_axis, chunk.labels, label="Labels", color=COLOR_ACCENT)
     ax.plot(
         time_axis,
         prediction,
@@ -148,7 +146,8 @@ def figure_3_plot_with_prediction(
         )
         inset.plot(
             time_axis[idx_left:idx_right],
-            chunk.labels[idx_left:idx_right] * chunk.audio.max(),
+            chunk.labels[idx_left:idx_right],
+            chunk.labels[idx_left:idx_right],
             color=COLOR_ACCENT,
         )
         inset.plot(
@@ -187,9 +186,7 @@ def figure_4_aux_data_stack(
     plot_items = []
 
     plot_items.append(("Audio", chunk.audio[idx_left:idx_right], COLOR_PRIMARY))
-    plot_items.append(
-        ("Labels", chunk.labels[idx_left:idx_right] * chunk.audio.max(), COLOR_PRIMARY)
-    )
+    plot_items.append(("Labels", chunk.labels[idx_left:idx_right], COLOR_PRIMARY))
     plot_items.append(("Predictions", predictions[idx_left:idx_right], COLOR_PRIMARY))
 
     # Add aux data
