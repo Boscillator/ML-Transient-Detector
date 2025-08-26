@@ -249,7 +249,8 @@ def load_summary(path: Path) -> ResultsSummary:
                 post_gain=obj["post_gain"],
                 post_bias=obj["post_bias"],
                 compressor_window_size_sec=obj["compressor_window_size_sec"],
-                compressor_gain=obj["compressor_gain"],
+                compressor_makeup_gain=obj["compressor_makeup_gain"],
+                compressor_threshold=obj["compressor_threshold"],
             )
         elif cls is EvaluationResult:
             return EvaluationResult(**obj)

@@ -17,7 +17,8 @@ from filters import design_biquad_bandpass, biquad_apply, apply_fir_filter
 logger = logging.getLogger(__name__)
 
 FORCE_SAMPLE_RATE = 48000
-MAX_WINDOW_SIZE = int(0.1 * FORCE_SAMPLE_RATE)
+MAX_WINDOW_SIZE_SECONDS = 0.05
+MAX_WINDOW_SIZE = int(MAX_WINDOW_SIZE_SECONDS * FORCE_SAMPLE_RATE)
 
 
 @jax.tree_util.register_dataclass
@@ -109,7 +110,9 @@ class Params:
 
     compressor_window_size_sec: float
 
-    compressor_gain: float
+    compressor_makeup_gain: float
+
+    compressor_threshold: float
 
 
 @dataclass
@@ -358,14 +361,14 @@ def transient_detector(
     original_audio = audio
     compressor_env = None
     compressed_audio = None
-
+    
     if hyperparameters.enable_compressor:
         compressor_env = moving_average(
             audio**2, params.compressor_window_size_sec, FORCE_SAMPLE_RATE
         )
         compressor_env = jnp.sqrt(compressor_env)
-        compressed_audio = audio * (1 - compressor_env) + 1e-8
-        audio = compressed_audio
+        compressor_gain = jnp.where(compressor_env > params.compressor_threshold, params.compressor_threshold / compressor_env, 1.0)
+        compressed_audio = audio * compressor_gain * params.compressor_makeup_gain
     else:
         compressed_audio = audio
 
@@ -377,24 +380,24 @@ def transient_detector(
         if hyperparameters.enable_filters:
             b, a = design_biquad_bandpass(f0, q, FORCE_SAMPLE_RATE)
             if is_training:
-                filtered = apply_fir_filter(audio, b, a)
+                filtered = apply_fir_filter(compressed_audio, b, a)
             else:
-                filtered = biquad_apply(audio, b, a)
+                filtered = biquad_apply(compressed_audio, b, a)
         else:
-            filtered = audio
-
+            filtered = compressed_audio
+        
         if return_aux:
             filtered_waveforms.append(filtered)
-
+        
         power = filtered**2
         avg = moving_average(
             power, window_size_s, FORCE_SAMPLE_RATE, is_training=is_training
         )
         rms = jnp.sqrt(avg)
-
+        
         if return_aux:
             raw_envelopes.append(rms)
-
+        
         weighted_rms = weight * rms
         return weighted_rms
 
@@ -403,10 +406,10 @@ def transient_detector(
         channels = []
         for i in range(len(params.window_size_sec)):
             ch = channel(
-                params.window_size_sec[i],
-                params.weights[i],
-                params.filter_f0s[i],
-                params.filter_qs[i],
+                params.window_size_sec[i], 
+                params.weights[i], 
+                params.filter_f0s[i], 
+                params.filter_qs[i]
             )
             channels.append(ch)
         channels = jnp.stack(channels)
@@ -424,21 +427,21 @@ def transient_detector(
         return result
     else:
         aux_data = {
-            "channel_outputs": channels,
+            "channel_outputs": channels, 
             "pre_activation": pre_activation,
             "original_audio": original_audio,
             "compressed_audio": compressed_audio,
         }
-
+        
         if hyperparameters.enable_compressor and compressor_env is not None:
             aux_data["compressor_envelope"] = compressor_env
-
+        
         if filtered_waveforms:
             aux_data["filtered_waveforms"] = jnp.stack(filtered_waveforms)
-
+        
         if raw_envelopes:
             aux_data["raw_envelopes"] = jnp.stack(raw_envelopes)
-
+            
         return result, aux_data
 
 
@@ -476,6 +479,9 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
                 jnp.array([params.bias]),
                 jnp.array([params.post_gain]),
                 jnp.array([params.post_bias]),
+                jnp.array([params.compressor_window_size_sec]),
+                jnp.array([params.compressor_makeup_gain]),
+                jnp.array([params.compressor_threshold]),
             ]
         )
 
@@ -488,7 +494,8 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         post_gain = flat[4 * num_channels + 1]
         post_bias = flat[4 * num_channels + 2]
         compressor_window_size_sec = flat[4 * num_channels + 3]
-        compressor_gain = flat[4 * num_channels + 4]
+        compressor_makeup_gain = flat[4 * num_channels + 4]
+        compressor_threshold = flat[4 * num_channels + 5]
         return Params(
             window_size_sec=window_size_sec,
             weights=weights,
@@ -498,7 +505,8 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
             post_gain=post_gain,
             post_bias=post_bias,
             compressor_window_size_sec=compressor_window_size_sec,
-            compressor_gain=compressor_gain,
+            compressor_makeup_gain=compressor_makeup_gain,
+            compressor_threshold=compressor_threshold,
         )
 
     def pad_to_length(arr, target_len):
@@ -557,21 +565,23 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         post_gain=10.0,
         post_bias=0.0,
         compressor_window_size_sec=0.01,
-        compressor_gain=0.0,
+        compressor_makeup_gain=1.0,
+        compressor_threshold=1.0,
     )
     # Move initial params to GPU
     x0 = jax.device_put(params_to_flat(init_params), device)
 
     bounds = (
-        [(0.0001, 0.1)] * num_channels  # window_size_sec
+        [(0.0001, MAX_WINDOW_SIZE_SECONDS)] * num_channels  # window_size_sec
         + [(-200, 200)] * num_channels  # weights
         + [(20.0, 20000.0)] * num_channels  # filter_f0s (audio band)
         + [(0.1, 2.0)] * num_channels  # filter_qs (typical Q range)
         + [(-2, 2)]  # bias
         + [(0.0, 200.0)]  # post_gain
         + [(-20, 20)]  # post_bias
-        + [(0.0001, 0.1)]  # compressor_window_size_sec
-        + [(0.0, 100.0)]  # compressor_gain
+        + [(0.0001, 0.01)]  # compressor_window_size_sec
+        + [(1.0, 100.0)]  # compressor_makeup_gain
+        + [(0.0, 1.0)]  # compressor_threshold
     )
 
     minimizer_kwargs = {
@@ -746,7 +756,7 @@ def evaluate_model(
     """
     Evaluates the model on the provided chunks using the specified hyperparameters and parameters.
     """
-    thresholds = [0.5, 0.7, 0.9]
+    thresholds = [0.3, 0.5, 0.7, 0.9]
     training_results: List[EvaluationResult] = []
     validation_results: List[EvaluationResult] = []
     for threshold in thresholds:
@@ -835,28 +845,28 @@ def main():
     ]
 
     trials: List[Tuple[str, Hyperparameters]] = [
-        ("ch2", Hyperparameters(num_channels=2)),
-        ("ch2_filt", Hyperparameters(num_channels=2, enable_filters=True)),
-        ("ch2_comp", Hyperparameters(num_channels=2, enable_compressor=True)),
-        (
-            "ch2_filtcomp",
-            Hyperparameters(
-                num_channels=2, enable_filters=True, enable_compressor=True
-            ),
-        ),
+        # ("ch2", Hyperparameters(num_channels=2)),
+        # ("ch2_filt", Hyperparameters(num_channels=2, enable_filters=True)),
+        # ("ch2_compfix", Hyperparameters(num_channels=2, enable_compressor=True)),
+        # (
+        #     "ch2_filtcompfix",
+        #     Hyperparameters(
+        #         num_channels=2, enable_filters=True, enable_compressor=True
+        #     ),
+        # ),
         (
             "ch3_filtcomp",
             Hyperparameters(
                 num_channels=3, enable_filters=True, enable_compressor=True
             ),
         ),
-        (
-            "ch5_filtcomp",
-            Hyperparameters(
-                num_channels=5, enable_filters=True, enable_compressor=True
-            ),
-        ),
-        ("ch5", Hyperparameters(num_channels=5)),
+        # (
+        #     "ch5_filt",
+        #     Hyperparameters(
+        #         num_channels=5, enable_filters=True, enable_compressor=False
+        #     ),
+        # ),
+        # ("ch5", Hyperparameters(num_channels=5)),
     ]
 
     for name, hyperparameters in trials:
