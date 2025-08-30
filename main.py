@@ -17,7 +17,7 @@ from filters import design_biquad_bandpass, biquad_apply, apply_fir_filter
 logger = logging.getLogger(__name__)
 
 FORCE_SAMPLE_RATE = 48000
-MAX_WINDOW_SIZE_SECONDS = 0.05
+MAX_WINDOW_SIZE_SECONDS = 0.1
 MAX_WINDOW_SIZE = int(MAX_WINDOW_SIZE_SECONDS * FORCE_SAMPLE_RATE)
 
 

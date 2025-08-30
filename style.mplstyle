@@ -1,0 +1,45 @@
+# To check more avaialble options see:
+# https://matplotlib.org/tutorials/introductory/customizing.html
+
+text.color : 0e1216
+
+# AXES
+axes.titlesize : 16
+axes.labelsize : 14
+axes.edgecolor : 0e1216
+axes.labelcolor : 0e1216
+axes.linewidth : 1
+axes.spines.top : True
+axes.spines.right : True
+axes.spines.bottom : True
+axes.spines.left : True
+axes.facecolor: fafafa
+
+# GRID
+axes.grid : False
+grid.alpha : 0.7
+grid.linestyle : --
+grid.linewidth : 0.6
+
+# LINES
+axes.prop_cycle : cycler('color', [ '5396D0', '9025B1', '3A3335', 'F0544F', 'AAC0AF']) #hex colours
+lines.linewidth : 1.5
+lines.markeredgewidth : 0.0
+
+# SCATTER PLOT
+scatter.marker : .
+
+# TICKS
+xtick.labelsize : 13
+xtick.color : 0e1216
+xtick.direction : in
+ytick.labelsize : 13
+ytick.color : 0e1216
+ytick.direction : in
+
+# FIGURE OUTPUT 
+figure.figsize  : 4, 3
+figure.dpi : 150
+figure.facecolor: fafafa
+savefig.facecolor: fafafa
+savefig.dpi : 200
