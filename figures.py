@@ -1,4 +1,5 @@
 import json
+from typing import Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -256,12 +257,50 @@ def loss_plot(summary_path: Path, summary_name: str):
     plt.savefig(out_path)
     print(f"Saved loss plot to {out_path}")
 
+
+def chunk_plot(track_name: str, hyperparameters: Optional[Hyperparameters] = None):
+    """
+    Plots the audio waveform and labels for a given track name using load_data and filter argument.
+    Audio and labels are plotted on the same axis with different scales.
+    """
+    from main import load_data, FORCE_SAMPLE_RATE
+    if hyperparameters is None:
+        hyperparameters = Hyperparameters()
+    chunks = load_data(hyperparameters, filter={track_name})
+    if not chunks:
+        print(f"No chunk found for track '{track_name}'")
+        return
+    chunk = chunks[0]
+    audio = np.array(chunk.audio)
+    labels = np.array(chunk.labels)
+    t = np.arange(len(audio)) / FORCE_SAMPLE_RATE
+    fig, ax1 = plt.subplots(figsize=(14, 6))
+    color_audio = "C0"
+    color_labels = "C1"
+    ax1.plot(t, audio, color=color_audio, label="Audio", alpha=0.7)
+    ax1.set_ylabel("Audio amplitude", color=color_audio)
+    ax1.tick_params(axis="y", labelcolor=color_audio)
+    ax2 = ax1.twinx()
+    ax2.plot(t, labels, color=color_labels, label="Labels", alpha=0.7)
+    ax2.set_ylabel("Labels", color=color_labels)
+    ax2.tick_params(axis="y", labelcolor=color_labels)
+    ax1.set_xlabel("Time (s)")
+    # Combine legends
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
+    plt.tight_layout()
+    out_path = Path("figures") / f"chunk.png"
+    plt.savefig(out_path)
+    print(f"Saved chunk plot to {out_path}")
+
 def main():
     jax.config.update("jax_platform_name", "cpu")
     plt.style.use("./style.mplstyle")
     # simple_detector_explainer()
-    loss_plot(Path("data/results/ch2_results.json"), "Simple Model")
-    loss_plot(Path("data/results/ch2_filtcompfix_results.json"), "2 Channels with Filter & Compressor")
+    # loss_plot(Path("data/results/ch2_results.json"), "Simple Model")
+    # loss_plot(Path("data/results/ch2_filtcompfix_results.json"), "2 Channels with Filter & Compressor")
+    chunk_plot("DarkIllusion_ElecGtr5DI")
 
 
 if __name__ == "__main__":
