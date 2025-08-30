@@ -59,8 +59,8 @@ for t in np.array(transient_times):
 
 
 # Envelope generator parameters
-rise_time = 0.005  # seconds to rise to 1.0
-fall_time = 0.2    # seconds to decay to 0.0
+rise_time = 0.05  # seconds to rise to 1.0
+fall_time = 0.1    # seconds to decay to 0.0
 
 # Create envelope array
 envelop = np.zeros(len(audio))
@@ -90,18 +90,14 @@ envelop = np.clip(envelop, 0, 1)
 plt.plot(time_axis, envelop, label="Envelope CV", color="magenta", linewidth=1.2)
 
 
-# Lowpass filter parameters
-from scipy.signal import butter, lfilter
-initial_cutoff = 0.0  # Hz
-resonance = 0.7         # Q factor (not used in butterworth, but can be used in other designs)
-mod_depth = 3000.0      # Hz, how much the envelope modulates the cutoff
+# Formant filter bank with F1=370 Hz and F2=1900 Hz, modulated by envelope
+from scipy.signal import iirpeak, lfilter
 
-# Modulate cutoff frequency by envelope
-mod_cutoff = initial_cutoff + envelop * mod_depth
+formant_freqs = np.array([370.0, 1900.0])  # F1 and F2
+# Per-formant modulation depths (can be positive or negative)
+mod_depths = np.array([-200.0, 400.0])  # F1 decreases, F2 increases
+formant_q = 8.0    # Q factor for formant peaks
 
-# To apply a time-varying filter, process in blocks or per-sample (here: block-wise for simplicity)
-
-# Improved block-wise filtering with Hann window and 50% overlap-add
 block_size = 1024
 hop_size = block_size // 2
 window = np.hanning(block_size)
@@ -109,15 +105,15 @@ filtered_audio = np.zeros(len(audio) + block_size)
 window_sum = np.zeros(len(audio) + block_size)
 
 for i in range(0, len(audio) - block_size + 1, hop_size):
-    cutoff = np.mean(mod_cutoff[i:i+block_size])
-    cutoff = np.clip(cutoff, 20, sample_rate/2-100)
-    butter_out = butter(N=2, Wn=cutoff/(sample_rate/2), btype='low')
-    if isinstance(butter_out, tuple) and len(butter_out) >= 2:
-        b, a = butter_out[:2]
-    else:
-        b, a = butter_out, None
+    block_env = np.mean(envelop[i:i+block_size])
     block = np.array(audio[i:i+block_size])
-    block_filtered = lfilter(b, a, block)
+    block_filtered = np.zeros_like(block)
+    for f, base_freq in enumerate(formant_freqs):
+        center_freq = base_freq + block_env * mod_depths[f]
+        center_freq = np.clip(center_freq, 20, sample_rate/2-100)
+        b, a = iirpeak(center_freq/(sample_rate/2), Q=formant_q)
+        block_filtered += lfilter(b, a, block)
+    block_filtered /= len(formant_freqs)
     block_windowed = block_filtered * window
     filtered_audio[i:i+block_size] += block_windowed
     window_sum[i:i+block_size] += window
@@ -125,6 +121,18 @@ for i in range(0, len(audio) - block_size + 1, hop_size):
 # Normalize by window sum to avoid amplitude modulation
 window_sum = np.where(window_sum == 0, 1, window_sum)
 filtered_audio = filtered_audio[:len(audio)] / window_sum[:len(audio)]
+
+
+# Normalize output loudness to match original
+def rms(x):
+    return np.sqrt(np.mean(np.square(x)))
+
+orig_rms = rms(np.array(audio))
+out_rms = rms(filtered_audio)
+if out_rms > 0:
+    filtered_audio = filtered_audio * (orig_rms / out_rms)
+
+filtered_audio = 0.9 * filtered_audio
 
 # Save filtered audio
 from scipy.io.wavfile import write
