@@ -481,40 +481,61 @@ def optimize(
     num_channels = hyperparameters.num_channels
 
     def params_to_flat(params):
-        return jnp.concatenate(
-            [
-                jnp.array(params.window_size_sec),
-                jnp.array(params.weights),
-                jnp.array(params.filter_f0s),
-                jnp.array(params.filter_qs),
-                jnp.array([params.bias]),
-                jnp.array([params.post_gain]),
-                jnp.array([params.post_bias]),
-                jnp.array([params.compressor_window_size_sec]),
-                jnp.array([params.compressor_makeup_gain]),
-                jnp.array([params.compressor_threshold]),
-            ]
-        )
+        flat = [
+            jnp.array(params.window_size_sec),
+            jnp.array(params.weights),
+            jnp.array([params.bias]),
+            jnp.array([params.post_gain]),
+            jnp.array([params.post_bias]),
+        ]
+        if hyperparameters.enable_filters:
+            flat.append(jnp.array(params.filter_f0s))
+            flat.append(jnp.array(params.filter_qs))
+        if hyperparameters.enable_compressor:
+            flat.append(jnp.array([params.compressor_window_size_sec]))
+            flat.append(jnp.array([params.compressor_makeup_gain]))
+            flat.append(jnp.array([params.compressor_threshold]))
+        return jnp.concatenate(flat)
 
     def flat_to_params(flat):
-        window_size_sec = jnp.array(flat[:num_channels])
-        weights = jnp.array(flat[num_channels : 2 * num_channels])
-        filter_f0s = jnp.array(flat[2 * num_channels : 3 * num_channels])
-        filter_qs = jnp.array(flat[3 * num_channels : 4 * num_channels])
-        bias = flat[4 * num_channels]
-        post_gain = flat[4 * num_channels + 1]
-        post_bias = flat[4 * num_channels + 2]
-        compressor_window_size_sec = flat[4 * num_channels + 3]
-        compressor_makeup_gain = flat[4 * num_channels + 4]
-        compressor_threshold = flat[4 * num_channels + 5]
+        idx = 0
+        window_size_sec = jnp.array(flat[idx : idx + num_channels])
+        idx += num_channels
+        weights = jnp.array(flat[idx : idx + num_channels])
+        idx += num_channels
+        bias = flat[idx]
+        idx += 1
+        post_gain = flat[idx]
+        idx += 1
+        post_bias = flat[idx]
+        idx += 1
+        if hyperparameters.enable_filters:
+            filter_f0s = jnp.array(flat[idx : idx + num_channels])
+            idx += num_channels
+            filter_qs = jnp.array(flat[idx : idx + num_channels])
+            idx += num_channels
+        else:
+            filter_f0s = jnp.zeros(num_channels)
+            filter_qs = jnp.ones(num_channels)
+        if hyperparameters.enable_compressor:
+            compressor_window_size_sec = flat[idx]
+            idx += 1
+            compressor_makeup_gain = flat[idx]
+            idx += 1
+            compressor_threshold = flat[idx]
+            idx += 1
+        else:
+            compressor_window_size_sec = 0.01
+            compressor_makeup_gain = 1.0
+            compressor_threshold = 1.0
         return Params(
             window_size_sec=window_size_sec,
             weights=weights,
-            filter_f0s=filter_f0s,
-            filter_qs=filter_qs,
             bias=bias,
             post_gain=post_gain,
             post_bias=post_bias,
+            filter_f0s=filter_f0s,
+            filter_qs=filter_qs,
             compressor_window_size_sec=compressor_window_size_sec,
             compressor_makeup_gain=compressor_makeup_gain,
             compressor_threshold=compressor_threshold,
@@ -570,14 +591,14 @@ def optimize(
         * jnp.where(
             jnp.arange(num_channels) % 2 == 0, 1, -1
         ),  # Alternating sign helps optimizer
-        filter_f0s=jnp.array([2000.0] * num_channels),
-        filter_qs=jnp.array([1.0] * num_channels),
         bias=0.0,
         post_gain=10.0,
         post_bias=0.0,
-        compressor_window_size_sec=0.01,
-        compressor_makeup_gain=1.0,
-        compressor_threshold=1.0,
+        filter_f0s=jnp.array([2000.0] * num_channels) if hyperparameters.enable_filters else jnp.zeros(num_channels),
+        filter_qs=jnp.array([1.0] * num_channels) if hyperparameters.enable_filters else jnp.ones(num_channels),
+        compressor_window_size_sec=0.01 if hyperparameters.enable_compressor else 0.01,
+        compressor_makeup_gain=1.0 if hyperparameters.enable_compressor else 1.0,
+        compressor_threshold=1.0 if hyperparameters.enable_compressor else 1.0,
     )
     # Move initial params to GPU
     x0 = jax.device_put(params_to_flat(init_params), device)
@@ -585,15 +606,21 @@ def optimize(
     bounds = (
         [(0.0001, MAX_WINDOW_SIZE_SECONDS)] * num_channels  # window_size_sec
         + [(-20, 20)] * num_channels  # weights
-        + [(20.0, 20000.0)] * num_channels  # filter_f0s (audio band)
-        + [(0.1, 2.0)] * num_channels  # filter_qs (typical Q range)
         + [(-2, 2)]  # bias
         + [(0.0, 200.0)]  # post_gain
         + [(-20, 20)]  # post_bias
-        + [(0.0001, 0.01)]  # compressor_window_size_sec
-        + [(1.0, 100.0)]  # compressor_makeup_gain
-        + [(0.0, 1.0)]  # compressor_threshold
     )
+    if hyperparameters.enable_filters:
+        bounds += (
+            [(20.0, 20000.0)] * num_channels  # filter_f0s
+            + [(0.1, 2.0)] * num_channels  # filter_qs
+        )
+    if hyperparameters.enable_compressor:
+        bounds += (
+            [(0.0001, 0.01)]  # compressor_window_size_sec
+            + [(1.0, 100.0)]  # compressor_makeup_gain
+            + [(0.0, 1.0)]  # compressor_threshold
+        )
 
     minimizer_kwargs = {
         "method": "L-BFGS-B",
@@ -875,19 +902,19 @@ def main():
     ]
 
     trials: List[Tuple[str, Hyperparameters]] = [
-        ("ch2", Hyperparameters(num_channels=2)),
+        # ("ch2", Hyperparameters(num_channels=2)),
         # (
         #     "ch2_basin",
         #     Hyperparameters(num_channels=2, optimization_method="basinhopping"),
         # ),
         # ("ch2_filt", Hyperparameters(num_channels=2, enable_filters=True)),
         # ("ch2_compfix", Hyperparameters(num_channels=2, enable_compressor=True)),
-        # (
-        #     "ch2_filtcompfix",
-        #     Hyperparameters(
-        #         num_channels=2, enable_filters=True, enable_compressor=True
-        #     ),
-        # ),
+        (
+            "ch2_filtcompfix",
+            Hyperparameters(
+                num_channels=2, enable_filters=True, enable_compressor=True
+            ),
+        ),
         # (
         #     "ch3_filtcomp",
         #     Hyperparameters(

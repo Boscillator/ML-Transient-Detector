@@ -235,10 +235,33 @@ def simple_detector_explainer():
     plt.savefig("figures/simple_detector_explainer.png")
 
 
+def loss_plot(summary_path: Path, summary_name: str):
+    """
+    Plots the loss history from a results summary file and saves the figure.
+    The output filename is figures/loss_{summary_path.stem}.png
+    """
+    summary = load_summary(summary_path)
+    if not hasattr(summary, "loss_history") or summary.loss_history is None:
+        print(f"No loss history found in {summary_path}")
+        return
+    loss = summary.loss_history
+    plt.figure(figsize=(8, 4))
+    plt.plot(loss, label=f"MSE: {summary_name}", color="C0")
+    plt.xlabel("Iteration")
+    plt.ylabel("Mean Squared Error Loss")
+    # plt.title(f"Loss History: {summary_name}")
+    plt.legend()
+    plt.tight_layout()
+    out_path = Path("figures") / f"loss_{summary_name}.png".replace(" ", "_").replace(',', '').replace('&', '').lower()
+    plt.savefig(out_path)
+    print(f"Saved loss plot to {out_path}")
+
 def main():
     jax.config.update("jax_platform_name", "cpu")
     plt.style.use("./style.mplstyle")
-    simple_detector_explainer()
+    # simple_detector_explainer()
+    loss_plot(Path("data/results/ch2_results.json"), "Simple Model")
+    loss_plot(Path("data/results/ch2_filtcompfix_results.json"), "2 Channels with Filter & Compressor")
 
 
 if __name__ == "__main__":
