@@ -464,7 +464,9 @@ transient_detector_v = jax.jit(
 )
 
 
-def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
+from typing import Tuple
+
+def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Tuple[Params, list[float]]:
     import scipy.optimize
 
     num_channels = hyperparameters.num_channels
@@ -591,23 +593,27 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         "options": {"maxiter": 100, "disp": True},
     }
     logger.info("Starting optimization with initial params: %s", init_params)
+    loss_history = []
     if hyperparameters.optimization_method == "basinhopping":
+        def callback_basinhopping(x, f, accept):
+            loss_history.append(float(f))
         result = scipy.optimize.basinhopping(
             scipy_loss_and_grad,
             x0,
             minimizer_kwargs=minimizer_kwargs,
             niter=10,
             disp=True,
+            callback=callback_basinhopping,
         )
         best_params = flat_to_params(result.x)
         logger.info("Basinhopping optimization result: %s", result)
-        return best_params
+        return best_params, loss_history
     elif hyperparameters.optimization_method == "differential_evolution":
-
         def print_intermediate_result(intermediate_result: Any = None):
+            loss_val = float(intermediate_result.fun)
+            loss_history.append(loss_val)
             print(intermediate_result)
             print(flat_to_params(intermediate_result.x))
-
         result = scipy.optimize.differential_evolution(
             loss_vectorized,
             bounds,
@@ -621,7 +627,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Params:
         )
         best_params = flat_to_params(result.x)
         logger.info("Differential evolution optimization result: %s", result)
-        return best_params
+        return best_params, loss_history
     else:
         raise ValueError(
             f"Unknown optimization_method: {hyperparameters.optimization_method}"
@@ -775,9 +781,10 @@ def evaluate_model(
     )
 
 
-def write_summary(path: Path, results_summary: ResultsSummary):
+def write_summary(path: Path, results_summary: ResultsSummary, loss_history: list[float]):
     """
     Writes a summary of the results to a JSON file, converting arrays to lists for serialization.
+    Now also stores loss_history.
     """
     import json
 
@@ -806,6 +813,7 @@ def write_summary(path: Path, results_summary: ResultsSummary):
         "validation_results": [
             to_serializable(r) for r in results_summary.validation_results
         ],
+        "loss_history": to_serializable(loss_history),
     }
 
     with open(path, "w") as f:
@@ -819,12 +827,13 @@ def train_model(
     validation_data: List[Chunk],
 ) -> None:
     logger.info("Training model with %s", name)
-    params = optimize(hyperparameters, training_data)
+    params, loss_history = optimize(hyperparameters, training_data)
+    logger.info("Loss history during optimization: %s", loss_history)
 
     logger.info("Evaluating model with %s", name)
     results = evaluate_model(hyperparameters, params, training_data, validation_data)
     logger.info("Got best score of %s", results.get_best_result())
-    write_summary(Path(f"data/results/{name}_results.json"), results)
+    write_summary(Path(f"data/results/{name}_results.json"), results, loss_history)
 
 
 def main():
@@ -846,6 +855,7 @@ def main():
 
     trials: List[Tuple[str, Hyperparameters]] = [
         # ("ch2", Hyperparameters(num_channels=2)),
+        ("ch2_basin", Hyperparameters(num_channels=2, optimization_method='basinhopping')),
         # ("ch2_filt", Hyperparameters(num_channels=2, enable_filters=True)),
         # ("ch2_compfix", Hyperparameters(num_channels=2, enable_compressor=True)),
         # (
@@ -854,12 +864,12 @@ def main():
         #         num_channels=2, enable_filters=True, enable_compressor=True
         #     ),
         # ),
-        (
-            "ch3_filtcomp",
-            Hyperparameters(
-                num_channels=3, enable_filters=True, enable_compressor=True
-            ),
-        ),
+        # (
+        #     "ch3_filtcomp",
+        #     Hyperparameters(
+        #         num_channels=3, enable_filters=True, enable_compressor=True
+        #     ),
+        # ),
         # (
         #     "ch5_filt",
         #     Hyperparameters(
@@ -875,7 +885,7 @@ def main():
 
 
 if __name__ == "__main__":
-    jax.config.update("jax_debug_nans", False)
+    jax.config.update("jax_debug_nans", True)
     jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
     jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
