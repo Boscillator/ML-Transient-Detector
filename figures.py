@@ -294,13 +294,83 @@ def chunk_plot(track_name: str, hyperparameters: Optional[Hyperparameters] = Non
     plt.savefig(out_path)
     print(f"Saved chunk plot to {out_path}")
 
+
+def model_explainer_plot(summary_path: Path = Path("data/results/ch2_results.json"), wav_path: Path = Path("data/Gtr2.wav")):
+    """
+    Loads a wave file and summary data, runs the model, and plots:
+    1) Audio waveform and model predictions (different scales)
+    2) Channel outputs (one scale) and pre_activation (another scale)
+    """
+    # Load summary and model
+    summary = load_summary(summary_path)
+    hyper = summary.hyperparameters
+    params = summary.parameters
+    # Load audio
+    sample_rate, audio_np = wavfile.read(wav_path)
+    assert sample_rate == FORCE_SAMPLE_RATE, f"Sample rate {sample_rate} != {FORCE_SAMPLE_RATE}"
+    if audio_np.dtype == np.int16:
+        audio_np = audio_np.astype(np.float32) / 32768.0
+    elif audio_np.dtype == np.int32:
+        audio_np = audio_np.astype(np.float32) / 2147483648.0
+    elif audio_np.dtype == np.uint8:
+        audio_np = (audio_np.astype(np.float32) - 128) / 128.0
+    else:
+        audio_np = audio_np.astype(np.float32)
+    if audio_np.ndim > 1:
+        audio_np = np.mean(audio_np, axis=1)
+    audio = jnp.array(audio_np)
+    # Run model with aux data
+    predictions, aux = transient_detector(hyper, params, audio, is_training=False, return_aux=True)
+    channel_outputs = np.array(aux["channel_outputs"])
+    pre_activation = np.array(aux["pre_activation"])
+    audio_np = np.array(audio)
+    predictions_np = np.array(predictions)
+    t = np.arange(len(audio_np)) / FORCE_SAMPLE_RATE
+    # Plot
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+    # First subplot: audio and predictions
+    color_audio = "C0"
+    color_pred = "C3"
+    ax1.plot(t, audio_np, color=color_audio, label="Audio", alpha=0.7)
+    ax1.set_ylabel("Audio amplitude", color=color_audio)
+    ax1.tick_params(axis="y", labelcolor=color_audio)
+    ax1b = ax1.twinx()
+    ax1b.plot(t, predictions_np, color=color_pred, label="Model predictions", alpha=0.7)
+    ax1b.set_ylabel("Model predictions", color=color_pred)
+    ax1b.tick_params(axis="y", labelcolor=color_pred)
+    # ax1.set_title(f"Audio and Model Predictions: {wav_path.stem}")
+    # Combine legends
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines1b, labels1b = ax1b.get_legend_handles_labels()
+    ax1.legend(lines1 + lines1b, labels1 + labels1b, loc="upper right")
+    # Second subplot: channel outputs and pre_activation
+    color_ch = [f"C{i}" for i in range(channel_outputs.shape[0])]
+    for i in range(channel_outputs.shape[0]):
+        ax2.plot(t, channel_outputs[i], color=color_ch[i], label=f"Channel {i}", alpha=0.7)
+    ax2.set_ylabel("Channel outputs")
+    ax2b = ax2.twinx()
+    ax2b.plot(t, pre_activation, color="C4", label="sum(channels) + bias", linestyle="--", alpha=0.7)
+    ax2b.set_ylabel("Envelop Diff", color="C4")
+    ax2b.tick_params(axis="y", labelcolor="C4")
+    ax2.set_xlabel("Time (s)")
+    # ax2.set_title(f"Channels and Pre-activation: {wav_path.stem}")
+    # Combine legends
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    lines2b, labels2b = ax2b.get_legend_handles_labels()
+    ax2.legend(lines2 + lines2b, labels2 + labels2b, loc="upper right")
+    plt.tight_layout()
+    out_path = Path("figures") / f"model_explainer_{summary_path.stem}.png"
+    plt.savefig(out_path)
+    print(f"Saved model explainer plot to {out_path}")
+
 def main():
     jax.config.update("jax_platform_name", "cpu")
     plt.style.use("./style.mplstyle")
     # simple_detector_explainer()
     # loss_plot(Path("data/results/ch2_results.json"), "Simple Model")
     # loss_plot(Path("data/results/ch2_filtcompfix_results.json"), "2 Channels with Filter & Compressor")
-    chunk_plot("DarkIllusion_ElecGtr5DI")
+    # chunk_plot("DarkIllusion_ElecGtr5DI")
+    model_explainer_plot()
 
 
 if __name__ == "__main__":
