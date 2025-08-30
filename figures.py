@@ -1,17 +1,85 @@
+import json
 import jax
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.io.wavfile as wavfile
 from pathlib import Path
-from main import transient_detector, Hyperparameters, Params, Chunk, FORCE_SAMPLE_RATE
+from main import (
+    EvaluationResult,
+    ResultsSummary,
+    transient_detector,
+    Hyperparameters,
+    Params,
+    Chunk,
+    FORCE_SAMPLE_RATE,
+)
+
+
+def load_summary(path: Path) -> ResultsSummary:
+    with open(path, "r") as f:
+        summary_dict = json.load(f)
+
+    def from_serializable(cls, obj):
+        # Recursively reconstruct dataclasses and arrays
+        if cls is Hyperparameters:
+            return Hyperparameters(**obj)
+        elif cls is Params:
+            # Convert lists to jnp arrays for array fields
+            return Params(
+                window_size_sec=jnp.array(obj["window_size_sec"]),
+                weights=jnp.array(obj["weights"]),
+                filter_f0s=jnp.array(obj["filter_f0s"]),
+                filter_qs=jnp.array(obj["filter_qs"]),
+                bias=obj["bias"],
+                post_gain=obj["post_gain"],
+                post_bias=obj["post_bias"],
+                compressor_window_size_sec=obj["compressor_window_size_sec"],
+                compressor_makeup_gain=obj["compressor_makeup_gain"],
+                compressor_threshold=obj["compressor_threshold"],
+            )
+        elif cls is EvaluationResult:
+            return EvaluationResult(**obj)
+        elif cls is ResultsSummary:
+            # Only keep EvaluationResult objects in lists
+            tr = [
+                from_serializable(EvaluationResult, r) for r in obj["training_results"]
+            ]
+            tr = [r for r in tr if isinstance(r, EvaluationResult)]
+            vr = [
+                from_serializable(EvaluationResult, r)
+                for r in obj["validation_results"]
+            ]
+            vr = [r for r in vr if isinstance(r, EvaluationResult)]
+            summary = ResultsSummary(
+                hyperparameters=from_serializable(
+                    Hyperparameters, obj["hyperparameters"]
+                ),
+                parameters=from_serializable(Params, obj["parameters"]),
+                training_results=tr,
+                validation_results=vr,
+            )
+            # Attach loss_history if present
+            if "loss_history" in obj:
+                summary.loss_history = obj["loss_history"]
+            return summary
+        else:
+            return obj
+
+    result = from_serializable(ResultsSummary, summary_dict)
+    if not isinstance(result, ResultsSummary):
+        raise TypeError("Deserialized object is not a ResultsSummary")
+    return result
+
 
 def simple_detector_explainer():
     # Load audio
     wav_path = Path("data/Gtr2.wav")
     # wav_path = Path("data/export/DarkIllusion_Kick.wav")
     sample_rate, audio_np = wavfile.read(wav_path)
-    assert sample_rate == FORCE_SAMPLE_RATE, f"Sample rate {sample_rate} != {FORCE_SAMPLE_RATE}"
+    assert sample_rate == FORCE_SAMPLE_RATE, (
+        f"Sample rate {sample_rate} != {FORCE_SAMPLE_RATE}"
+    )
     # Convert to float32 and normalize to +/-1.0
     if audio_np.dtype == np.int16:
         audio_np = audio_np.astype(np.float32) / 32768.0
@@ -30,7 +98,9 @@ def simple_detector_explainer():
     labels = jnp.zeros_like(audio)
 
     # Setup hyperparameters and params (use reasonable defaults)
-    hyper = Hyperparameters(num_channels=2, enable_filters=False, enable_compressor=False)
+    hyper = Hyperparameters(
+        num_channels=2, enable_filters=False, enable_compressor=False
+    )
     params = Params(
         window_size_sec=jnp.array([0.02, 0.1]),
         weights=jnp.array([1.0, 1.0]),
@@ -45,7 +115,9 @@ def simple_detector_explainer():
     )
 
     # Run transient_detector with aux data
-    _, aux = transient_detector(hyper, params, audio, is_training=False, return_aux=True)
+    _, aux = transient_detector(
+        hyper, params, audio, is_training=False, return_aux=True
+    )
     raw_envelopes = np.array(aux["raw_envelopes"])  # shape: (channels, samples)
     audio_np = np.array(audio)
 
@@ -62,13 +134,12 @@ def simple_detector_explainer():
         crop_end_t = min(t[-1], 1.0)
         # crop_end_t = t[-1]
 
-
     fig, (ax_audio, ax_env) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
 
     # Plot audio in first subplot
     ax_audio.plot(t, audio_np, label="Input", color="C0", alpha=0.7)
     ax_audio.set_ylabel("Audio amplitude", color="C0")
-    ax_audio.tick_params(axis='y', labelcolor="C0")
+    ax_audio.tick_params(axis="y", labelcolor="C0")
     ax_audio.set_xlim(crop_start_t, crop_end_t)
 
     # If there are at least 2 envelopes, plot thresholded diff on a separate scale
@@ -77,21 +148,31 @@ def simple_detector_explainer():
         diff = raw_envelopes[0] - raw_envelopes[1]
         above_thresh = (diff > threshold).astype(float)
         ax_audio_diff = ax_audio.twinx()
-        ax_audio_diff.plot(t, above_thresh, label=f"Diff > {threshold}", color="C3", alpha=0.7)
+        ax_audio_diff.plot(
+            t, above_thresh, label=f"Diff > {threshold}", color="C3", alpha=0.7
+        )
         ax_audio_diff.set_ylabel("Diff > threshold", color="C3")
         ax_audio_diff.set_xlim(crop_start_t, crop_end_t)
-        ax_audio_diff.tick_params(axis='y', labelcolor="C3")
+        ax_audio_diff.tick_params(axis="y", labelcolor="C3")
         ax_audio_diff.axhline(y=threshold, color="C3", linestyle="--", alpha=0.7)
         # Combine legends
         lines_audio, labels_audio = ax_audio.get_legend_handles_labels()
         lines_diff, labels_diff = ax_audio_diff.get_legend_handles_labels()
-        ax_audio.legend(lines_audio + lines_diff, labels_audio + labels_diff, loc="upper left")
+        ax_audio.legend(
+            lines_audio + lines_diff, labels_audio + labels_diff, loc="upper left"
+        )
     else:
         ax_audio.legend(loc="upper left")
 
     # Plot envelopes on main axis of second subplot
     for i in range(raw_envelopes.shape[0]):
-        ax_env.plot(t, raw_envelopes[i], label=f"Envelope period={int(params.window_size_sec[i] * 1000)}ms", linestyle="--", alpha=0.8)
+        ax_env.plot(
+            t,
+            raw_envelopes[i],
+            label=f"Envelope period={int(params.window_size_sec[i] * 1000)}ms",
+            linestyle="--",
+            alpha=0.8,
+        )
     ax_env.set_ylabel("Envelope")
     ax_env.set_xlim(crop_start_t, crop_end_t)
     ax_env.set_xlabel("Time (s)")
@@ -100,14 +181,18 @@ def simple_detector_explainer():
     if raw_envelopes.shape[0] >= 2:
         ax_env_diff = ax_env.twinx()
         diff = raw_envelopes[0] - raw_envelopes[1]
-        ax_env_diff.plot(t, diff, label="Envelope Diff (Ch0-Ch1)", color="C2", alpha=0.8)
+        ax_env_diff.plot(
+            t, diff, label="Envelope Diff (Ch0-Ch1)", color="C2", alpha=0.8
+        )
         ax_env_diff.set_ylabel("Envelope Diff", color="C2")
         ax_env_diff.set_xlim(crop_start_t, crop_end_t)
-        ax_env_diff.tick_params(axis='y', labelcolor="C2")
+        ax_env_diff.tick_params(axis="y", labelcolor="C2")
         # Legends for both axes
         lines_env, labels_env = ax_env.get_legend_handles_labels()
         lines_diff, labels_diff = ax_env_diff.get_legend_handles_labels()
-        ax_env.legend(lines_env + lines_diff, labels_env + labels_diff, loc="upper left")
+        ax_env.legend(
+            lines_env + lines_diff, labels_env + labels_diff, loc="upper left"
+        )
 
         # Compute above_thresh here to ensure it is always defined
         threshold = 0.05  # keep consistent with audio subplot
@@ -124,32 +209,37 @@ def simple_detector_explainer():
                 "Fast envelop rises quickly",
                 xy=(time_arrow, y_fast),
                 xytext=(time_arrow - 0.2, y_fast + 0.1),
-                arrowprops=dict(facecolor='C0', edgecolor='none', shrink=0.05, width=2, headwidth=8),
-                color='C0',
+                arrowprops=dict(
+                    facecolor="C0", edgecolor="none", shrink=0.05, width=2, headwidth=8
+                ),
+                color="C0",
                 fontsize=11,
-                ha='left',
+                ha="left",
             )
             # Arrow for slow envelope
             ax_env.annotate(
                 "Slow envelop lags",
                 xy=(time_arrow, y_slow),
                 xytext=(time_arrow + 0.05, y_slow - 0.08),
-                arrowprops=dict(facecolor='C1', edgecolor='none', shrink=0.05, width=2, headwidth=8),
-                color='C1',
+                arrowprops=dict(
+                    facecolor="C1", edgecolor="none", shrink=0.05, width=2, headwidth=8
+                ),
+                color="C1",
                 fontsize=11,
-                ha='left',
+                ha="left",
             )
     else:
         ax_env.legend(loc="upper left")
 
     plt.tight_layout()
-    plt.savefig('figures/simple_detector_explainer.png')
+    plt.savefig("figures/simple_detector_explainer.png")
 
 
 def main():
     jax.config.update("jax_platform_name", "cpu")
     plt.style.use("./style.mplstyle")
     simple_detector_explainer()
+
 
 if __name__ == "__main__":
     main()

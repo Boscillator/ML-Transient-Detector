@@ -17,7 +17,7 @@ from filters import design_biquad_bandpass, biquad_apply, apply_fir_filter
 logger = logging.getLogger(__name__)
 
 FORCE_SAMPLE_RATE = 48000
-MAX_WINDOW_SIZE_SECONDS = 0.1
+MAX_WINDOW_SIZE_SECONDS = 0.05
 MAX_WINDOW_SIZE = int(MAX_WINDOW_SIZE_SECONDS * FORCE_SAMPLE_RATE)
 
 
@@ -152,6 +152,8 @@ class ResultsSummary:
 
     validation_results: List[EvaluationResult]
     """List of evaluation results for each threshold"""
+
+    loss_history: Optional[List[float]] = None
 
     def get_best_result(self) -> EvaluationResult:
         """Returns the best evaluation result based on F1 score"""
@@ -361,13 +363,17 @@ def transient_detector(
     original_audio = audio
     compressor_env = None
     compressed_audio = None
-    
+
     if hyperparameters.enable_compressor:
         compressor_env = moving_average(
             audio**2, params.compressor_window_size_sec, FORCE_SAMPLE_RATE
         )
         compressor_env = jnp.sqrt(compressor_env)
-        compressor_gain = jnp.where(compressor_env > params.compressor_threshold, params.compressor_threshold / compressor_env, 1.0)
+        compressor_gain = jnp.where(
+            compressor_env > params.compressor_threshold,
+            params.compressor_threshold / compressor_env,
+            1.0,
+        )
         compressed_audio = audio * compressor_gain * params.compressor_makeup_gain
     else:
         compressed_audio = audio
@@ -385,19 +391,19 @@ def transient_detector(
                 filtered = biquad_apply(compressed_audio, b, a)
         else:
             filtered = compressed_audio
-        
+
         if return_aux:
             filtered_waveforms.append(filtered)
-        
+
         power = filtered**2
         avg = moving_average(
             power, window_size_s, FORCE_SAMPLE_RATE, is_training=is_training
         )
         rms = jnp.sqrt(avg)
-        
+
         if return_aux:
             raw_envelopes.append(rms)
-        
+
         weighted_rms = weight * rms
         return weighted_rms
 
@@ -406,10 +412,10 @@ def transient_detector(
         channels = []
         for i in range(len(params.window_size_sec)):
             ch = channel(
-                params.window_size_sec[i], 
-                params.weights[i], 
-                params.filter_f0s[i], 
-                params.filter_qs[i]
+                params.window_size_sec[i],
+                params.weights[i],
+                params.filter_f0s[i],
+                params.filter_qs[i],
             )
             channels.append(ch)
         channels = jnp.stack(channels)
@@ -427,21 +433,21 @@ def transient_detector(
         return result
     else:
         aux_data = {
-            "channel_outputs": channels, 
+            "channel_outputs": channels,
             "pre_activation": pre_activation,
             "original_audio": original_audio,
             "compressed_audio": compressed_audio,
         }
-        
+
         if hyperparameters.enable_compressor and compressor_env is not None:
             aux_data["compressor_envelope"] = compressor_env
-        
+
         if filtered_waveforms:
             aux_data["filtered_waveforms"] = jnp.stack(filtered_waveforms)
-        
+
         if raw_envelopes:
             aux_data["raw_envelopes"] = jnp.stack(raw_envelopes)
-            
+
         return result, aux_data
 
 
@@ -466,7 +472,10 @@ transient_detector_v = jax.jit(
 
 from typing import Tuple
 
-def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Tuple[Params, list[float]]:
+
+def optimize(
+    hyperparameters: Hyperparameters, chunks: List[Chunk]
+) -> Tuple[Params, list[float]]:
     import scipy.optimize
 
     num_channels = hyperparameters.num_channels
@@ -575,7 +584,7 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Tuple[Par
 
     bounds = (
         [(0.0001, MAX_WINDOW_SIZE_SECONDS)] * num_channels  # window_size_sec
-        + [(-200, 200)] * num_channels  # weights
+        + [(-20, 20)] * num_channels  # weights
         + [(20.0, 20000.0)] * num_channels  # filter_f0s (audio band)
         + [(0.1, 2.0)] * num_channels  # filter_qs (typical Q range)
         + [(-2, 2)]  # bias
@@ -595,8 +604,10 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Tuple[Par
     logger.info("Starting optimization with initial params: %s", init_params)
     loss_history = []
     if hyperparameters.optimization_method == "basinhopping":
+
         def callback_basinhopping(x, f, accept):
             loss_history.append(float(f))
+
         result = scipy.optimize.basinhopping(
             scipy_loss_and_grad,
             x0,
@@ -609,11 +620,13 @@ def optimize(hyperparameters: Hyperparameters, chunks: List[Chunk]) -> Tuple[Par
         logger.info("Basinhopping optimization result: %s", result)
         return best_params, loss_history
     elif hyperparameters.optimization_method == "differential_evolution":
+
         def print_intermediate_result(intermediate_result: Any = None):
             loss_val = float(intermediate_result.fun)
             loss_history.append(loss_val)
             print(intermediate_result)
             print(flat_to_params(intermediate_result.x))
+
         result = scipy.optimize.differential_evolution(
             loss_vectorized,
             bounds,
@@ -758,6 +771,7 @@ def evaluate_model(
     params: Params,
     training_data: List[Chunk],
     validation_data: List[Chunk],
+    loss_history: Optional[List[float]] = None,
 ) -> ResultsSummary:
     """
     Evaluates the model on the provided chunks using the specified hyperparameters and parameters.
@@ -778,10 +792,11 @@ def evaluate_model(
         parameters=params,
         training_results=training_results,
         validation_results=validation_results,
+        loss_history=loss_history,
     )
 
 
-def write_summary(path: Path, results_summary: ResultsSummary, loss_history: list[float]):
+def write_summary(path: Path, results_summary: ResultsSummary):
     """
     Writes a summary of the results to a JSON file, converting arrays to lists for serialization.
     Now also stores loss_history.
@@ -813,7 +828,7 @@ def write_summary(path: Path, results_summary: ResultsSummary, loss_history: lis
         "validation_results": [
             to_serializable(r) for r in results_summary.validation_results
         ],
-        "loss_history": to_serializable(loss_history),
+        "loss_history": to_serializable(results_summary.loss_history),
     }
 
     with open(path, "w") as f:
@@ -831,9 +846,15 @@ def train_model(
     logger.info("Loss history during optimization: %s", loss_history)
 
     logger.info("Evaluating model with %s", name)
-    results = evaluate_model(hyperparameters, params, training_data, validation_data)
+    results = evaluate_model(
+        hyperparameters,
+        params,
+        training_data,
+        validation_data,
+        loss_history=loss_history,
+    )
     logger.info("Got best score of %s", results.get_best_result())
-    write_summary(Path(f"data/results/{name}_results.json"), results, loss_history)
+    write_summary(Path(f"data/results/{name}_results.json"), results)
 
 
 def main():
@@ -854,8 +875,11 @@ def main():
     ]
 
     trials: List[Tuple[str, Hyperparameters]] = [
-        # ("ch2", Hyperparameters(num_channels=2)),
-        ("ch2_basin", Hyperparameters(num_channels=2, optimization_method='basinhopping')),
+        ("ch2", Hyperparameters(num_channels=2)),
+        # (
+        #     "ch2_basin",
+        #     Hyperparameters(num_channels=2, optimization_method="basinhopping"),
+        # ),
         # ("ch2_filt", Hyperparameters(num_channels=2, enable_filters=True)),
         # ("ch2_compfix", Hyperparameters(num_channels=2, enable_compressor=True)),
         # (
